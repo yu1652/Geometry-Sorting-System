@@ -1,6 +1,7 @@
 ﻿#include <Arduino.h>
 
 #include "comm.h"
+#include <esp_system.h>
 #include "config.h"
 #include "pusher.h"
 #include "servos.h"
@@ -24,6 +25,8 @@ struct PushPlan {
 static String inputLine;
 static SystemState state = SystemState::WaitStart;
 static bool systemRunning = false;
+static bool hostReady = false;
+static uint32_t bootId = 0;
 static unsigned long nextPushRetryAt = 0;
 
 static int lastStartButtonReading = HIGH;
@@ -49,6 +52,7 @@ static const char *stateName();
 
 void setup() {
     Serial.begin(115200);
+    bootId = esp_random();
     Serial.setTimeout(30);
 
     initStartButton();
@@ -62,6 +66,7 @@ void setup() {
     }
 
     sendText("READY");
+    sendText(String("BOOT,") + String(bootId));
     if (AUTO_START_SYSTEM) {
         startSystem();
     } else {
@@ -116,6 +121,11 @@ static void pollStartButton() {
     stableStartButtonState = reading;
     if (stableStartButtonState == START_BUTTON_ACTIVE_LEVEL) {
         if (startButtonArmed && !systemRunning) {
+            if (!hostReady) {
+                startButtonArmed = false;
+                sendText("STATUS,WAIT_HOST");
+                return;
+            }
             sendText("STATUS,BUTTON_START");
             startSystem();
         } else if (startButtonArmed) {
@@ -140,7 +150,20 @@ static void handleCommand(String command) {
         return;
     }
     if (command == "STATUS?") {
-        sendText(String("STATUS,MCU,") + stateName() + "," + String(xyCurrentX()) + "," + String(xyCurrentY()));
+        sendText(String("STATUS,MCU,") + stateName() + "," + String(xyCurrentX()) + "," + String(xyCurrentY()) + "," + String(bootId));
+        return;
+    }
+    if (command == "HOST_READY") {
+        hostReady = true;
+        sendText("STATUS,HOST_READY");
+        return;
+    }
+    if (command == "START" && !hostReady) {
+        sendText("STATUS,WAIT_HOST");
+        return;
+    }
+    if (command == "SCAN,RETRY" && state == SystemState::WaitSort) {
+        sendScanRequest();
         return;
     }
     if (command == "START") {
@@ -222,6 +245,10 @@ static void handleCommand(String command) {
 }
 
 static void startSystem() {
+    if (!hostReady) {
+        sendText("STATUS,WAIT_HOST");
+        return;
+    }
     if (systemRunning) {
         sendText("STATUS,ALREADY_RUNNING");
         return;
@@ -246,6 +273,7 @@ static void startSystem() {
 }
 
 static void stopSystem() {
+    hostReady = false;
     systemRunning = false;
     nextPushRetryAt = 0;
     state = SystemState::Stopped;
@@ -256,6 +284,7 @@ static void stopSystem() {
 }
 
 static void resetSystem() {
+    hostReady = false;
     systemRunning = false;
     nextPushRetryAt = 0;
     xySetCurrentPosition(HOME_X_PULSE, HOME_Y_PULSE);
@@ -275,6 +304,7 @@ static void requestPushNow() {
     nextPushRetryAt = 0;
     sendText("STATUS,REQUEST_PUSH");
     sendPushRequest();
+    nextPushRetryAt = millis() + PUSH_RETRY_MS;
 }
 
 static void schedulePushRetry() {
@@ -286,7 +316,7 @@ static void schedulePushRetry() {
 }
 
 static void pollPushRetry() {
-    if (!systemRunning || nextPushRetryAt == 0) {
+    if (!systemRunning || state != SystemState::WaitPush || nextPushRetryAt == 0) {
         return;
     }
     if (static_cast<long>(millis() - nextPushRetryAt) >= 0) {
@@ -346,6 +376,7 @@ static void handlePushPlan(const PushPlan &plan) {
     }
 
     state = SystemState::Pushing;
+    nextPushRetryAt = 0;
     sendText(
         String("STATUS,PUSH_START,") + String(plan.startXmm, 2) + "," + String(plan.startYmm, 2) + "," +
         String(endXmm, 2) + "," + String(endYmm, 2)
