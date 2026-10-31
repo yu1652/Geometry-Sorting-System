@@ -154,6 +154,13 @@ static void handleCommand(String command) {
         return;
     }
     if (command == "HOST_READY") {
+        // STOP invalidates the position assumption; RESET must rebase counters
+        // after the operator has manually placed XY at the marked origin.
+        if (state == SystemState::Stopped) {
+            hostReady = false;
+            sendText("STATUS,RESET_REQUIRED");
+            return;
+        }
         hostReady = true;
         sendText("STATUS,HOST_READY");
         return;
