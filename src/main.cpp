@@ -355,12 +355,10 @@ static bool parsePushResponse(const String &command, PushPlan &plan) {
 }
 
 static void handlePushPlan(const PushPlan &plan) {
-    if (!systemRunning) {
-        sendText("ERROR,NOT_RUNNING");
-        return;
-    }
-    if (state != SystemState::WaitPush) {
-        sendText("ERROR,UNEXPECTED_PUSH");
+    if (!systemRunning || state != SystemState::WaitPush) {
+        // Retries can queue while host vision runs; their cached responses may
+        // arrive after the initial plan completed. Ignore outside WAIT_PUSH.
+        sendText("STATUS,PUSH_IGNORED");
         return;
     }
     const float endXmm = PUSH_END_X_MM;
