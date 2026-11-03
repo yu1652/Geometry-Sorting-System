@@ -1,0 +1,7 @@
+# Desktop x86_64 installs can use the PySide6/OpenCV wheels.
+# Jetson Xavier NX (aarch64, Ubuntu 20.04) uses the system packages:
+#   sudo apt install python3-pyqt5 python3-opencv
+PySide6-Essentials>=6.6,<7; platform_machine != "aarch64"
+opencv-python-headless>=4.8,<6; platform_machine != "aarch64"
+PyYAML>=5.3
+pyserial>=3.5

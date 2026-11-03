@@ -1,0 +1,67 @@
+model:
+  input_size: 320
+  class_count: 23
+  confidence_threshold: 0.25
+  iou_threshold: 0.7
+  mask_threshold: 0.5
+recognition:
+  unknown_color: 未知颜色
+  min_color_confidence: 0.35
+color:
+  hsv_ranges:
+    红色:
+      - lower: [0, 80, 50]
+        upper: [10, 255, 255]
+      - lower: [170, 80, 50]
+        upper: [180, 255, 255]
+    橙色:
+      - lower: [10, 80, 50]
+        upper: [20, 255, 255]
+    黄色:
+      - lower: [21, 80, 50]
+        upper: [38, 255, 255]
+    绿色:
+      - lower: [35, 60, 40]
+        upper: [85, 255, 255]
+    青色:
+      - lower: [85, 60, 40]
+        upper: [100, 255, 255]
+    蓝色:
+      - lower: [100, 60, 40]
+        upper: [130, 255, 255]
+    紫色:
+      - lower: [130, 50, 40]
+        upper: [160, 255, 255]
+  bbox_center_ratio: 0.6
+  valid_min_value: 40
+  valid_max_value: 245
+  valid_min_saturation: 40
+  min_valid_pixels: 50
+  black_value_max: 45
+  white_value_min: 165
+  achromatic_saturation_max: 35
+  fallback_to_segmentation: true
+class_name_map:
+  ba_leng_huan_zhu: 八棱环柱
+  ba_leng_zhu: 八棱柱
+  ban_qiu: 半球
+  ban_qiu_ke: 半球壳
+  liu_leng_huan_zhu: 六棱环柱
+  liu_leng_zhu: 六棱柱
+  qi_leng_huan_zhu: 七棱环柱
+  qi_leng_zhu: 七棱柱
+  san_leng_zhu: 三棱柱
+  shi_leng_huan_zhu: 十棱环柱
+  shi_leng_zhu: 十棱柱
+  si_leng_huan_zhu: 四棱环柱
+  si_leng_tai: 四棱台
+  si_leng_zhu: 四棱柱
+  si_leng_zhu_jia: 四棱柱甲
+  si_leng_zhui: 四棱锥
+  wu_leng_huan_zhu: 五棱环柱
+  wu_leng_tai: 五棱台
+  wu_leng_zhu: 五棱柱
+  yuan_huan_zhu: 圆环柱
+  yuan_tai: 圆台
+  yuan_zhu: 圆柱
+  yuan_zhui: 圆锥
