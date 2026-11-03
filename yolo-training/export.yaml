@@ -1,0 +1,17 @@
+# ONNX 导出参数（导出的模型要能直接替换部署端 weights/ 下的模型）
+#
+# 用法：
+#   yolo-training\yolo.cmd cfg=yolo-training\export.yaml model=runs\sort\shape\weights\best.pt
+#
+# 导完必须核对元数据：输入 1x3x640x640、输出 1x(4+nc)x8400、names 顺序与 classes.yaml 一致。
+# 现有部署模型就是这个形态（原始检测头，NMS 由部署端自己做），所以 nms 必须保持 False。
+
+mode: export
+format: onnx
+imgsz: 640
+batch: 1
+simplify: True
+nms: False
+dynamic: False
+
+# opset: 12    # 部署端 onnxruntime 报算子不支持时，再取消注释钉死版本

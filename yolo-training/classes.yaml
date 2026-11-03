@@ -1,0 +1,47 @@
+# 类别表 —— 全流程唯一真源（single source of truth）
+#
+# 行号（从 0 开始）就是 YOLO 的 class_id，行尾注释是中文名。
+# 排列规则：先实心、后空心；同类内按棱数 3→10 升序，圆形放同类末尾。
+#
+# 规则：
+#   1. 改类别只改这个 names 列表，然后重跑 build_dataset.py 重新生成 data.yaml；
+#      不需要手工写 nc（只写 names 时 nc 自动等于 len(names)）。
+#   2. 标注之前把类别定死。标完再改顺序，所有 .txt 里的整数 id 会整体错位。
+#   3. 以后要加新类别，追加到列表末尾，不要插在中间，否则已有标签全要改。
+#   4. 类别名用汉语拼音，小写字母 + 数字 + 下划线，不带声调；
+#      分词用下划线隔开（如 si_leng_huan_zhu），比连写更容易核对。
+#
+# 26 类分 6 组（三棱柱与正三棱柱算同一类）：
+#   0-7    实心棱柱 / 圆柱（按棱数 3→10，圆柱压尾）
+#   8-14   环柱（中间有通孔；四~十棱，圆环柱压尾）
+#   15-17  筒 / 架（薄壁空心件）
+#   18-19  锥
+#   20-22  台（圆台、棱台）
+#   23-25  球 / 半球 / 半球壳
+names:
+  - san_leng_zhu                  # 0  三棱柱（含正三棱柱）
+  - si_leng_zhu                   # 1  四棱柱
+  - wu_leng_zhu                   # 2  五棱柱
+  - liu_leng_zhu                  # 3  六棱柱
+  - qi_leng_zhu                   # 4  七棱柱
+  - ba_leng_zhu                   # 5  八棱柱
+  - shi_leng_zhu                  # 6  十棱柱
+  - yuan_zhu                      # 7  圆柱
+  - si_leng_huan_zhu              # 8  四棱环柱
+  - wu_leng_huan_zhu              # 9  五棱环柱
+  - liu_leng_huan_zhu             # 10 六棱环柱
+  - qi_leng_huan_zhu              # 11 七棱环柱
+  - ba_leng_huan_zhu              # 12 八棱环柱
+  - shi_leng_huan_zhu             # 13 十棱环柱
+  - yuan_huan_zhu                 # 14 圆环柱
+  - yuan_tong                     # 15 圆筒
+  - si_leng_tong                  # 16 四棱筒
+  - si_leng_zhu_jia               # 17 四棱柱架
+  - si_leng_zhui                  # 18 四棱锥
+  - yuan_zhui                     # 19 圆锥
+  - yuan_tai                      # 20 圆台
+  - si_leng_tai                   # 21 四棱台
+  - wu_leng_tai                   # 22 五棱台
+  - qiu                           # 23 球
+  - ban_qiu                       # 24 半球
+  - ban_qiu_ke                    # 25 半球壳

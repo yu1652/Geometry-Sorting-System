@@ -1,5 +1,43 @@
-.pio
-.vscode/.browse_c_cpp.db*
-.vscode/c_cpp_properties.json
-.vscode/launch.json
-.vscode/ipch
+# PlatformIO build outputs and local editor state
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+
+# Python environments, caches, and local test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# YOLO training artifacts, datasets, and exported model weights
+runs/
+wandb/
+datasets/
+data/
+images/
+labels/
+weights/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+
+# Machine-local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs and operating-system clutter
+*.log
+.DS_Store
+Thumbs.db

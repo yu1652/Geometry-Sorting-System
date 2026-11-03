@@ -1,0 +1,68 @@
+# YOLO 训练参数（给 GPU 训练机用）
+#
+# 用法（注意 cfg= 必须写在最前面）：
+#   yolo-training\yolo.cmd cfg=yolo-training/train.yaml data=<数据集根>/data.yaml
+#   （已经把 Python 的 Scripts 目录加进 PATH 的话，把 yolo-training\yolo.cmd 换成 yolo 即可）
+#
+# 为什么要放最前：Ultralytics 命令行解析到 cfg= 时，会用这个 YAML 整体替换掉
+# 之前累积的参数覆盖；写在前面的参数会被丢掉，写在后面的才生效。
+#
+# 本文件不写 data：数据集路径每台机器不同，统一从命令行传入。
+# 本机（只有 CPU）只适合校验配置，真训练请放到有 CUDA 的机器上。
+
+task: detect
+mode: train          # 必须显式写，否则默认会变成 predict
+
+model: yolov8n.pt    # 没有网络时改成 yolov8n.yaml（本地已内置，可离线构建）
+                     # 部署端现有模型是 YOLOv8n 系列，保持同一代最稳
+epochs: 100
+patience: 50
+imgsz: 640           # 必须与部署端 ONNX 输入 1x3x640x640 保持一致
+batch: 16            # 显存不够改 8 / 4
+device: 0            # 多卡可写 [0,1]；只做流程调试写 cpu
+workers: 8           # Windows 本机建议 0 或 2，Linux 训练机 8 没问题
+cache: False         # 数据集不大想加速可改 ram
+seed: 0
+deterministic: True
+
+optimizer: auto
+lr0: 0.01
+lrf: 0.01
+cos_lr: True
+close_mosaic: 10     # 最后 10 个 epoch 关掉 mosaic，收敛更稳
+
+amp: True
+rect: False          # mosaic 需要方形批次
+multi_scale: 0.0
+single_cls: False
+cls_remap: True
+fraction: 1.0
+
+val: True
+plots: True
+save: True
+save_period: -1
+
+project: runs/sort
+name: shape
+exist_ok: False      # 同名目录自动递增，不会覆盖上一轮
+
+# ---- 增广：俯拍小目标 + 任意摆放角度 ----
+# 物块在托盘上朝向是任意的，所以旋转增广开到 180 度；颜色由下游 HSV 判定，
+# 这里把色相/饱和/亮度扰动开大一点可以让形状模型对颜色更不敏感。
+hsv_h: 0.015
+hsv_s: 0.5
+hsv_v: 0.4
+degrees: 180.0
+translate: 0.1
+scale: 0.3
+shear: 0.0
+perspective: 0.0
+flipud: 0.5
+fliplr: 0.5
+mosaic: 0.5
+mixup: 0.0
+cutmix: 0.0
+
+# ---- 本机 CPU 调试档（临时命令行覆盖即可，不必改文件）----
+# yolo-training\yolo.cmd cfg=yolo-training/train.yaml data=... device=cpu workers=2 batch=4 imgsz=320 epochs=3

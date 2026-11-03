@@ -1,0 +1,51 @@
+# data.yaml 范例（build_dataset.py 会按这个格式生成真正使用的那一份）
+#
+# 为什么没有 path：
+#   Ultralytics 解析 data.yaml 时，如果没有 path，就把「本文件所在目录」当作数据集根；
+#   如果写了相对 path，反而会被解析到 ultralytics 的 datasets_dir 下面，位置就跑偏了。
+#   所以让 data.yaml 和 images/ labels/ 保持同一层，整个目录可以原样拷到 Linux 训练机。
+#
+# 为什么没有 nc：
+#   只写 names 时 nc 会自动等于 len(names)；两个都写还必须长度一致，多一处会漂移的地方。
+#
+# 目录要求：
+#   <数据集根>/data.yaml              <- 本文件
+#   <数据集根>/images/train/*.jpg
+#   <数据集根>/images/val/*.jpg
+#   <数据集根>/labels/train/*.txt
+#   <数据集根>/labels/val/*.txt
+#   标签每行格式：class_id cx cy w h，坐标是 0~1 归一化值。
+#
+# 类别顺序必须与 classes.yaml 完全一致，改类别后重跑 build_dataset.py 即可。
+
+train: images/train
+val: images/val
+# test: images/test                 # 有独立测试集时取消注释
+
+names:
+  - san_leng_zhu                  # 0  三棱柱（含正三棱柱）
+  - si_leng_zhu                   # 1  四棱柱
+  - wu_leng_zhu                   # 2  五棱柱
+  - liu_leng_zhu                  # 3  六棱柱
+  - qi_leng_zhu                   # 4  七棱柱
+  - ba_leng_zhu                   # 5  八棱柱
+  - shi_leng_zhu                  # 6  十棱柱
+  - yuan_zhu                      # 7  圆柱
+  - si_leng_huan_zhu              # 8  四棱环柱
+  - wu_leng_huan_zhu              # 9  五棱环柱
+  - liu_leng_huan_zhu             # 10 六棱环柱
+  - qi_leng_huan_zhu              # 11 七棱环柱
+  - ba_leng_huan_zhu              # 12 八棱环柱
+  - shi_leng_huan_zhu             # 13 十棱环柱
+  - yuan_huan_zhu                 # 14 圆环柱
+  - yuan_tong                     # 15 圆筒
+  - si_leng_tong                  # 16 四棱筒
+  - si_leng_zhu_jia               # 17 四棱柱架
+  - si_leng_zhui                  # 18 四棱锥
+  - yuan_zhui                     # 19 圆锥
+  - yuan_tai                      # 20 圆台
+  - si_leng_tai                   # 21 四棱台
+  - wu_leng_tai                   # 22 五棱台
+  - qiu                           # 23 球
+  - ban_qiu                       # 24 半球
+  - ban_qiu_ke                    # 25 半球壳
