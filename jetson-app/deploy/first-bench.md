@@ -18,7 +18,7 @@ bash run_jetson.sh
 
 ## 2. ESP32
 
-Windows 端使用现场确认的固件源码。当前本地另有移除出口闸门舵机的改动，GitHub 版本仍包含出口闸门逻辑。先根据接线确认用哪一版，烧录前断开电机和舵机驱动电源，避免启动初始化引起动作。
+Windows 端使用本次部署包中的 PlatformIO 工程（ZIP 根目录的 `platformio.ini` 与 `src/`）。该固件已移除拆掉的出口闸门舵机初始化及控制，保留推板升降、识别区分拣舵机和六箱舵机。烧录前断开电机和舵机驱动电源，避免启动初始化引起动作。
 
 ```powershell
 pio device list

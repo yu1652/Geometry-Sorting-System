@@ -208,14 +208,6 @@ static void handleCommand(String command) {
         pusherLiftDown();
         return;
     }
-    if (command == "OUTLET,OPEN") {
-        outletGateOpen();
-        return;
-    }
-    if (command == "OUTLET,CLOSE") {
-        outletGateClose();
-        return;
-    }
     if (command == "SERVO2,OPEN") {
         writeServo2(SERVO2_OPEN_ANGLE);
         sendText("STATUS,SORT_GATE_OPEN");
@@ -264,7 +256,6 @@ static void startSystem() {
     state = SystemState::Idle;
     nextPushRetryAt = 0;
     pusherLiftUp();
-    outletGateOpen();
     sendText("STATUS,START");
 
     if (SERVO3_MOVE_ON_START) {
@@ -285,7 +276,6 @@ static void stopSystem() {
     nextPushRetryAt = 0;
     state = SystemState::Stopped;
     pusherLiftUp();
-    outletGateClose();
     enableXYMotors(false);
     sendText("STATUS,STOP");
 }

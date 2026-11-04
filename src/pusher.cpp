@@ -7,11 +7,8 @@
 #include "config.h"
 
 static Servo liftServo;
-static Servo outletGateServo;
 static int currentLiftAngle = PUSHER_LIFT_UP_ANGLE;
-static int currentGateAngle = OUTLET_GATE_CLOSED_ANGLE;
 static bool liftPositionKnown = false;
-static bool gatePositionKnown = false;
 
 static void moveServoTo(
     Servo &servo,
@@ -40,14 +37,12 @@ static void moveServoTo(
 
 void initPusher() {
     liftServo.attach(LIFT_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
-    outletGateServo.attach(OUTLET_GATE_SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
     resetPusher();
     sendText("STATUS,PUSHER_INIT");
 }
 
 void resetPusher() {
     pusherLiftUp();
-    outletGateClose();
 }
 
 void pusherLiftUp() {
@@ -60,28 +55,4 @@ void pusherLiftDown() {
     moveServoTo(liftServo, currentLiftAngle, liftPositionKnown, PUSHER_LIFT_DOWN_ANGLE, LIFT_DOWN_STEP_MS);
     delay(LIFT_SETTLE_MS);
     sendText("STATUS,PUSHER_DOWN");
-}
-
-void outletGateOpen() {
-    moveServoTo(
-        outletGateServo,
-        currentGateAngle,
-        gatePositionKnown,
-        OUTLET_GATE_OPEN_ANGLE,
-        OUTLET_GATE_STEP_MS
-    );
-    delay(OUTLET_GATE_SETTLE_MS);
-    sendText("STATUS,OUTLET_GATE_OPEN");
-}
-
-void outletGateClose() {
-    moveServoTo(
-        outletGateServo,
-        currentGateAngle,
-        gatePositionKnown,
-        OUTLET_GATE_CLOSED_ANGLE,
-        OUTLET_GATE_STEP_MS
-    );
-    delay(OUTLET_GATE_SETTLE_MS);
-    sendText("STATUS,OUTLET_GATE_CLOSED");
 }

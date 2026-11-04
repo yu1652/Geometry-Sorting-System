@@ -81,18 +81,13 @@ static const float PARK_Y_MM = 5.0f;
 static const unsigned long PUSH_RETRY_MS = 800;
 
 static const int LIFT_SERVO_PIN = 18;
-static const int OUTLET_GATE_SERVO_PIN = 5;
 
 static const int PUSHER_LIFT_UP_ANGLE = 160;
 static const int PUSHER_LIFT_DOWN_ANGLE = 115;
-static const int OUTLET_GATE_CLOSED_ANGLE = 290;
-static const int OUTLET_GATE_OPEN_ANGLE = 90;
 
 static const unsigned long LIFT_DOWN_STEP_MS = 25;
 static const unsigned long LIFT_UP_STEP_MS = 10;
-static const unsigned long OUTLET_GATE_STEP_MS = 15;
 static const unsigned long LIFT_SETTLE_MS = 500;
-static const unsigned long OUTLET_GATE_SETTLE_MS = 500;
 static const unsigned long PUSH_END_HOLD_MS = 200;
 
 static const int SERVO2_PIN = 19;
