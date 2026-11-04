@@ -118,7 +118,7 @@ class SimulatedSorter:
         self._pusher_down = down
         return True
 
-    def begin_cycle(self, x_mm, y_mm, bin_id):
+    def begin_cycle(self, x_mm, y_mm, bin_id=None):
         """Simulate PUSH? and leave the cycle waiting for SCAN."""
         if self._state != "running" or self._pusher_down:
             return self._reject("Automatic cycle requires running state and raised pusher")
@@ -141,6 +141,12 @@ class SimulatedSorter:
             and self.handle_mcu("SCAN")
             and self.handle_mcu("DONE")
         )
+
+    def complete_scan(self, bin_id):
+        if self._state != "wait_scan":
+            return self._reject("No simulated scan is pending")
+        self._pending_bin = bin_id
+        return self.handle_mcu("SCAN")
 
     def handle_mcu(self, line):
         """Consume one simulated wire event and return whether it was handled."""

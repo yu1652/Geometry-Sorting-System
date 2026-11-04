@@ -109,6 +109,17 @@ $env:QT_QPA_PLATFORM='offscreen'
 - 确认仿真零点后，可以在标定页测试 GOTO、按住下降和松开抬起。开始仿真分拣后，切到比赛页选择箱号，再执行一次模拟分拣；收到本周期 `DONE` 后计数。
 - `camera_service.py` 提供可单独测试的三路相机／录像读取接口。实际设备使用稳定路径并需要现场检查相机角色和分辨率。`tray_locator.py` 支持独立俯拍检测模型与九点映射，真实模型仍需在 Xavier NX 构建 `tray` TensorRT Engine。
 
+### 三路录像整链演练
+
+在仿真台保存九点标定，然后从 `jetson-app` 运行以下命令。绑定文件是 JSON 数组，形状使用 `models/legacy_classes.txt` 里的类别名，例如 `[{"shape":"yuan_huan_zhu","color":"青色","bin":2}]`。
+
+```text
+python -m pip install onnxruntime
+python sorter_replay.py --left left.avi --right right.avi --top top.avi --shape-onnx models/SHAPE.onnx --tray-onnx models/tray_object_detector.onnx --calibration data/simulation_calibration.json --bindings data/bin_bindings.json --steps 1
+```
+
+三路视频须事先按帧对齐，俯拍须为 640×480。每步各读取一帧，依次执行俯拍定位、模拟推送、双摄形色识别、六箱绑定和模拟 DONE 计数。无目标时输出 `no_target`；缺帧、定位越界或识别无有效绑定时停止并报告原因。终端每步输出仿真计数。此命令使用 CPU ONNX Runtime，供电脑端演练。
+
 ## 图形会话自启动模板
 
 `deploy/ylers-offline.desktop` 默认运行 `/home/nvidia/jetson_sorter_app/run_jetson.sh`。确认图形登录后能手动运行，再按实际程序路径编辑模板中的 `Exec`，并在 Jetson 的登录用户下执行：
