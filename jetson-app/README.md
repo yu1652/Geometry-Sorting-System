@@ -71,6 +71,21 @@ bash run_jetson.sh
 python -m unittest discover -s tests -v
 ```
 
+## 旧版双摄标注校验与掩膜导出
+
+在标注环境安装 `pycocotools`，从 `jetson-app` 目录运行：
+
+```bash
+python -m pip install pycocotools
+python tools/check_legacy_labels.py --images PATH --labels PATH --coco FILE --class-map FILE --output PATH
+```
+
+输入为左图在前、右图在后的 640×320 彩色拼接图。COCO 的 `images` 必须记录图像相对路径、宽和高。YOLO TXT 使用相同的相对路径，扩展名改为 `.txt`。每个 COCO 实例使用尺寸为 `[320, 640]` 的整图 RLE。类别映射 JSON 的键为 COCO `category_id`，值为旧模型的 YOLO 类别 ID（0–25），例如 `{"7": 0, "12": 3}`。同侧、同类且有正面积交集的框和掩膜实例必须唯一配对。
+
+输出目录必须尚未存在，父目录须已存在。`images/` 和 `masks/` 中的文件同名，格式为 `图像ID_实例ID_left.png` 或 `图像ID_实例ID_right.png`。彩色半图和单通道掩膜均为 320×320 像素，掩膜前景为 255，背景和通孔为 0。负样本须有 COCO 图像记录及空 YOLO TXT，导出左右半图及两张全零掩膜，文件名中的实例 ID 为 `negative`。校验失败时命令返回非零并指出相关输入。
+
+划分训练、验证和测试集时，仍按实物与采集组划分。同一实物、同一次连拍及同一拼接图的左右半图须留在同组。
+
 ## 下一阶段
 
 将 `vision_runtime.py` 通过长期运行的 Qt 工作线程接入“手动识别”，在 Xavier NX 上用真实 Engine 和样本图片完成验证。通过后再接入三路 USB 摄像头、俯拍标定和机械状态机。
