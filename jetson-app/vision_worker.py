@@ -59,7 +59,7 @@ class VisionWorker(QThread):
 
     def confirm_candidate(self): self._requests.put(("confirm",))
     def cancel_candidate(self): self._requests.put(("cancel",))
-    def rollback(self, fixture_pair): self._requests.put(("rollback", fixture_pair))
+    def rollback(self, slot, fixture_pair): self._requests.put(("rollback", slot, fixture_pair))
     def recognize(self, request_id, frame_revision, left_bgr, right_bgr):
         self._requests.put((request_id, frame_revision, left_bgr, right_bgr))
     def shutdown(self): self._requests.put(None)
@@ -109,7 +109,9 @@ class VisionWorker(QThread):
                             active = dict(state["active"])
                             active[slot] = {"manifest_path": str(release.manifest_path), "version": release.version}
                             candidate, result = self._trial(active, fixture, slot == "surface_mask")
-                            self._preview = (active, state["active"], candidate, result)
+                            history = dict(state["previous"])
+                            history[slot] = state["active"].get(slot)
+                            self._preview = (active, history, candidate, result)
                             self.model_trial_ready.emit({"slot": slot, "version": release.version, "result": result})
                         elif kind == "confirm":
                             if self._preview is None: raise ValueError("没有待确认的模型候选")
@@ -122,10 +124,17 @@ class VisionWorker(QThread):
                         else:
                             self._cancel()
                             state = self._store.read_active()
-                            prior = state["previous"]
-                            if prior is None: raise ValueError("没有可回退的模型版本")
-                            candidate, result = self._trial(prior, request[1], "surface_mask" in prior)
-                            try: self._store.commit_active(prior, state["active"])
+                            slot = request[1]
+                            if slot not in self._store.SLOTS or slot not in state["previous"]:
+                                raise ValueError("没有可回退的模型版本")
+                            prior = dict(state["active"])
+                            record = state["previous"][slot]
+                            if record is None: prior.pop(slot, None)
+                            else: prior[slot] = record
+                            history = dict(state["previous"])
+                            history[slot] = state["active"].get(slot)
+                            candidate, result = self._trial(prior, request[2], slot == "surface_mask" and record is not None)
+                            try: self._store.commit_active(prior, history)
                             except Exception:
                                 self._close(candidate)
                                 raise

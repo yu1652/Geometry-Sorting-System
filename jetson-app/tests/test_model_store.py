@@ -33,29 +33,42 @@ class ModelStoreTests(unittest.TestCase):
 if __name__=='__main__': unittest.main()
 
 class WorkerTransactionTests(ModelStoreTests):
- def test_trial_confirm_restart_and_rollback_to_defaults(self):
+ def test_independent_rollback_and_failure(self):
   from vision_worker import VisionWorker
   from types import SimpleNamespace
   with tempfile.TemporaryDirectory() as d:
-   store=ModelStore(Path(d)/'store'); made=[]
+   store=ModelStore(Path(d)/'store'); failures=[]
    class Fake:
-    def __init__(self, releases): self.releases=releases; self.closed=False; made.append(self)
-    def recognize_pair(self,*args): return SimpleNamespace(error=None, mask_status=('applied','disabled'))
-    def close(self): self.closed=True
-   worker=VisionWorker(store=store,loader=Fake)
-   side=self.package(d,version='side'); mask=self.package(d,slot='surface_mask',version='mask')
-   worker.trial_candidate(side,'side_detector',(None,None)); worker.confirm_candidate()
-   worker.trial_candidate(mask,'surface_mask',(None,None)); worker.confirm_candidate()
-   worker.rollback((None,None)); worker.shutdown(); worker.run()
+    def __init__(self, releases): pass
+    def recognize_pair(self,*args): return SimpleNamespace(error='bad' if failures else None, mask_status=('applied','disabled'))
+    def close(self): pass
+   def run(operation):
+    worker=VisionWorker(store=store,loader=Fake); operation(worker); worker.shutdown(); worker.run()
+   def install(slot,version):
+    path=self.package(d,slot=slot,version=version)
+    run(lambda w:(w.trial_candidate(path,slot,(None,None)),w.confirm_candidate()))
+   install('side_detector','A'); install('side_detector','B'); install('surface_mask','M'); install('surface_mask','N')
+   before=store.active_path.read_bytes(); failures.append(True)
+   run(lambda w:w.rollback('side_detector',(None,None)))
+   self.assertEqual(before,store.active_path.read_bytes()); failures.clear()
+   run(lambda w:w.rollback('side_detector',(None,None)))
    state=ModelStore(Path(d)/'store').read_active()
-   self.assertEqual(set(state['active']), {'side_detector'})
-   self.assertEqual(set(state['previous']), {'side_detector','surface_mask'})
-   self.assertTrue(all(x.closed for x in made))
-   worker=VisionWorker(store=store,loader=Fake); worker.rollback((None,None)); worker.shutdown(); worker.run()
-   self.assertEqual(set(store.read_active()['active']), {'side_detector','surface_mask'})
-   store.commit_active({'side_detector': state['active']['side_detector']}, {})
-   worker=VisionWorker(store=store,loader=Fake); worker.rollback((None,None)); worker.shutdown(); worker.run()
-   self.assertEqual(store.read_active()['active'], {})
+   self.assertEqual(state['active']['side_detector']['version'],'A')
+   self.assertEqual(state['active']['surface_mask']['version'],'N')
+   self.assertEqual(state['previous']['surface_mask']['version'],'M')
+   run(lambda w:w.rollback('surface_mask',(None,None)))
+   self.assertEqual(store.read_active()['active']['surface_mask']['version'],'M')
+   store.commit_active(state['active'], {'side_detector':None})
+   run(lambda w:w.rollback('side_detector',(None,None)))
+   self.assertNotIn('side_detector',store.read_active()['active'])
+ def test_legacy_pointer_migration(self):
+  with tempfile.TemporaryDirectory() as d:
+   store=ModelStore(d)
+   store.active_path.write_text(json.dumps({'active':{'side_detector':{'version':'B'},'surface_mask':{'version':'M'}},'previous':{'side_detector':{'version':'A'},'surface_mask':{'version':'M'}}}))
+   state=store.read_active(); self.assertEqual(state['previous'],{'side_detector':{'version':'A'}})
+   self.assertEqual(state['active']['surface_mask']['version'],'M')
+   store.active_path.write_text(json.dumps({'active':{'side_detector':{'version':'A'}},'previous':{}}))
+   self.assertIsNone(store.read_active()['previous']['side_detector'])
  def test_failed_trial_cancel_and_failed_commit_preserve_active(self):
   from vision_worker import VisionWorker
   from types import SimpleNamespace

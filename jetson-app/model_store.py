@@ -28,10 +28,16 @@ class ModelStore:
 
     def read_active(self):
         if not self.active_path.exists():
-            return {"active": {}, "previous": None}
+            return {"schema": 2, "active": {}, "previous": {}}
         value = json.loads(self.active_path.read_text(encoding="utf8"))
         if not isinstance(value.get("active"), dict) or value.get("previous") is not None and not isinstance(value.get("previous"), dict):
             raise ValueError("active model pointer is malformed")
+        if value.get("schema") is None:
+            active, old = value["active"], value["previous"]
+            previous = {} if old is None else {slot: old.get(slot) for slot in self.SLOTS if active.get(slot) != old.get(slot)}
+            return {"schema": 2, "active": active, "previous": previous}
+        if value.get("schema") != 2 or not isinstance(value.get("previous"), dict):
+            raise ValueError("unsupported model pointer schema")
         return value
 
     def validate_manifest(self, path, slot):
@@ -106,7 +112,7 @@ class ModelStore:
         fd, temporary = tempfile.mkstemp(prefix="active-", suffix=".tmp", dir=str(self.root))
         try:
             with os.fdopen(fd, "w", encoding="utf8") as stream:
-                json.dump({"active": active, "previous": previous}, stream, ensure_ascii=False)
+                json.dump({"schema": 2, "active": active, "previous": previous}, stream, ensure_ascii=False)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, str(self.active_path))

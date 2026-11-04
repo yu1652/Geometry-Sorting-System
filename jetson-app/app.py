@@ -131,6 +131,9 @@ class ModelDialog(QDialog):
             trial = QPushButton('试跑')
             trial.clicked.connect(lambda checked=False, s=slot: self.start_trial(s))
             row.addWidget(trial)
+            rollback = QPushButton('回退')
+            rollback.clicked.connect(lambda checked=False, s=slot: self.rollback(s))
+            row.addWidget(rollback)
             layout.addLayout(row)
         self.status = QLabel('请选择候选 manifest 和双视图样本')
         self.status.setWordWrap(True)
@@ -145,9 +148,6 @@ class ModelDialog(QDialog):
         cancel = QPushButton('取消候选')
         cancel.clicked.connect(self.cancel)
         row.addWidget(cancel)
-        rollback = QPushButton('回退')
-        rollback.clicked.connect(self.rollback)
-        row.addWidget(rollback)
         layout.addLayout(row)
         window._thread.model_trial_ready.connect(self.on_trial)
         window._thread.model_changed.connect(self.on_changed)
@@ -211,7 +211,7 @@ class ModelDialog(QDialog):
         self.confirm_button.setEnabled(False)
         self.status.setText('候选已取消')
 
-    def rollback(self):
+    def rollback(self, slot):
         if not self.available() or self.pending: return
         fixture = self.fixture()
         if fixture is None: return
@@ -219,7 +219,7 @@ class ModelDialog(QDialog):
         self.window.model_busy = True
         self.mutating = True
         self.status.setText('正在验证回退…')
-        self.window._thread.rollback(fixture)
+        self.window._thread.rollback(slot, fixture)
 
     def on_changed(self, active):
         if self.closed: return

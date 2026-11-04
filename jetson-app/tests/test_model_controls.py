@@ -79,8 +79,8 @@ class ModelControlsTests(unittest.TestCase):
   w=self.make_window(); w.show()
   w.display(np.zeros((320,640,3),dtype=np.uint8))
   d=app.ModelDialog(w); d.show()
-  w._thread.rollback=lambda fixture: None
-  d.rollback(); d.reject(); d.close(); w.close()
+  w._thread.rollback=lambda slot, fixture: None
+  d.rollback('side_detector'); d.reject(); d.close(); w.close()
   self.assertFalse(d.closed); self.assertFalse(w.closing)
   d.on_failed('failure')
   self.assertIn('failure',d.status.text())
