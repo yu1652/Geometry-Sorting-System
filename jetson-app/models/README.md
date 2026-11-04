@@ -14,3 +14,11 @@ sha256sum models/shape_legacy_fp16.engine
 Do not commit `.pt`, `.onnx`, `.engine` files or sample data. Real-device build and recognition acceptance are pending; no motion output is connected.
 
 Manifest keys are `schema` (1), `slot` (`side_detector` or `surface_mask`), `version`, `engine`, `sha256`, `input_shape`, `output_shape`, and `preprocess` (`legacy_stitched_v1` or `surface_rgb320_v1` respectively). The side detector also requires `class_names`. The engine must be a regular file in the manifest directory.
+
+The separate overhead locator uses the archived single-class `tray_object_detector.onnx` with input `[1,3,640,640]` and output `[1,5,8400]`. For later bench acceptance, place the ONNX file in `models/` and build on the Xavier NX:
+
+```bash
+/usr/src/tensorrt/bin/trtexec --onnx=models/tray_object_detector.onnx --saveEngine=models/tray_object_detector_fp16.engine --fp16 --workspace=256 --avgTiming=1 --buildOnly
+```
+
+Verify predictions on saved overhead frames before connecting the locator to motion. The simulated console uses a fixed sample detection and has no model-file requirement.

@@ -762,3 +762,14 @@ class BackendInferenceAndLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TrayContractTests(unittest.TestCase):
+    def test_tray_contract(self):
+        from trt_backend import TensorRTBackend, EngineContractError
+        events = []
+        engine = FakeEngine(events, kind='yolo', input_shape=(1,3,640,640), output_shape=(1,5,8400))
+        backend = TensorRTBackend(b'engine', 'tray', FakeTrt(engine), FakeCuda(events))
+        self.addCleanup(backend.close)
+        self.assertEqual(backend.infer(np.zeros((1,3,640,640), dtype=np.float32)).shape, (1,5,8400))
+        with self.assertRaises(EngineContractError):
+            TensorRTBackend(b'engine', 'yolo_legacy', FakeTrt(engine), FakeCuda([]))

@@ -202,8 +202,8 @@ class TensorRTBackend:
     """One synchronous TensorRT engine owned by one worker thread."""
 
     def __init__(self, engine_bytes, model_kind, trt_module, cuda_runtime, device=0):
-        if model_kind not in ("yolo", "yolo_legacy", "mask"):
-            raise ValueError("model_kind must be 'yolo', 'yolo_legacy', or 'mask'")
+        if model_kind not in ("yolo", "yolo_legacy", "tray", "mask"):
+            raise ValueError("model_kind must be 'yolo', 'yolo_legacy', 'tray', or 'mask'")
         if int(device) != 0:
             raise ValueError("this backend is fixed to CUDA device 0")
         self.model_kind = model_kind
@@ -302,7 +302,10 @@ class TensorRTBackend:
             int(value) for value in engine.get_binding_shape(output_index)
         )
         if self.model_kind != "mask":
-            if self.model_kind == "yolo_legacy":
+            if self.model_kind == "tray":
+                expected_input_shape = _YOLO_LEGACY_INPUT_SHAPE
+                expected_output_shape = (1, 5, 8400)
+            elif self.model_kind == "yolo_legacy":
                 expected_input_shape = _YOLO_LEGACY_INPUT_SHAPE
                 expected_output_shape = _YOLO_LEGACY_OUTPUT_SHAPE
             else:

@@ -100,8 +100,8 @@ def decode_yolo_raw(
     expected_count: int = 23,
 ) -> List[Detection]:
     """Decode YOLO11 [1, 4 + nc, N] output and run class-aware NMS."""
-    if expected_count not in (23, 26):
-        raise ValueError("expected_count must be 23 or 26")
+    if expected_count not in (1, 23, 26):
+        raise ValueError("expected_count must be 1, 23 or 26")
     if len(class_names) != expected_count:
         raise ValueError("class_names must contain exactly %d entries" % expected_count)
     if not isinstance(output, np.ndarray) or output.ndim != 3 or output.shape[0] != 1:
@@ -159,8 +159,8 @@ def decode_yolo_raw(
 
 def load_class_names(path, expected_count: int = 23) -> List[str]:
     """Load class names, allowing a training reserve tail for the 23-class model."""
-    if expected_count not in (23, 26):
-        raise ValueError("expected_count must be 23 or 26")
+    if expected_count not in (1, 23, 26):
+        raise ValueError("expected_count must be 1, 23 or 26")
     try:
         entries = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError as exc:

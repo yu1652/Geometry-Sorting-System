@@ -100,6 +100,25 @@ $env:QT_QPA_PLATFORM='offscreen'
 
 目标板按前述系统依赖创建 system-site-packages 虚拟环境，并在本机执行 `trtexec` 构建 Engine；用 `sha256sum` 记录 Engine 和输入 ONNX 的散列。启动应用后从模型管理选择候选，使用已保存双图试跑并检查识别预览，再显式确认启用。验证独立换掩膜时侧视版本不变；分别试跑成功、失败及回退，并重启核对 `data/model_store/active.json` 的版本。记录 TensorRT、CUDA、JetPack、Engine hash、每个实物的正确/错误/无结果和耗时。手工重点检查类别 ID/中文名、跨中线框、覆膜左右偏移、环件内孔、边界和空场。板端与真实样本验收尚待设备访问；在验收完成前保持覆膜默认关闭且不连接机械输出。
 
+## 无硬件仿真台
+
+从 `jetson-app` 运行 `python sorter_console.py`。该入口使用内存中的模拟 ESP32，顶部定位使用内置样例框，比赛页使用手选的模拟箱号，始终关闭机械输出。
+
+- 调试页显示三路示例画面。可以分别载入图片或录像首帧检查取景。样本预览与内置仿真定位样例各自独立。
+- 九点标定可编辑 P1–P9，也可导入旧版 v2 `xy_calibration.yaml` 的九点像素和毫米坐标。导入后先作为草稿显示，保存才写入 `data/simulation_calibration.json`。该文件只用于仿真。
+- 确认仿真零点后，可以在标定页测试 GOTO、按住下降和松开抬起。开始仿真分拣后，切到比赛页选择箱号，再执行一次模拟分拣；收到本周期 `DONE` 后计数。
+- `camera_service.py` 提供可单独测试的三路相机／录像读取接口。实际设备使用稳定路径并需要现场检查相机角色和分辨率。`tray_locator.py` 支持独立俯拍检测模型与九点映射，真实模型仍需在 Xavier NX 构建 `tray` TensorRT Engine。
+
+## 图形会话自启动模板
+
+`deploy/ylers-offline.desktop` 默认运行 `/home/nvidia/jetson_sorter_app/run_jetson.sh`。确认图形登录后能手动运行，再按实际程序路径编辑模板中的 `Exec`，并在 Jetson 的登录用户下执行：
+
+```bash
+install -Dm644 deploy/ylers-offline.desktop ~/.config/autostart/ylers-offline.desktop
+```
+
+模板只自动打开离线界面。无人操作时能否通电进入桌面，还需在目标板确认桌面登录设置并冷启动测试。
+
 ## 下一阶段
 
 在 Xavier NX 上用真实 Engine 和样本图片完成“手动识别”验证。通过后再接入三路 USB 摄像头、俯拍标定和机械状态机。

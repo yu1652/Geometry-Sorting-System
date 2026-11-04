@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=YLERS Xavier NX Offline
+Comment=Open the offline sorter console on graphical login
+Exec=/bin/bash /home/nvidia/jetson_sorter_app/run_jetson.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
