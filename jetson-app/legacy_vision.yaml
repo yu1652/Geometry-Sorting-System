@@ -1,0 +1,35 @@
+model:
+  confidence_threshold: 0.45
+  iou_threshold: 0.50
+recognition:
+  unknown_color: 未知颜色
+  min_color_confidence: 0.35
+color:
+  hsv_ranges:
+    红色:
+      - lower: [0, 80, 50]
+        upper: [10, 255, 255]
+      - lower: [170, 80, 50]
+        upper: [180, 255, 255]
+    橙色:
+      - lower: [10, 80, 50]
+        upper: [20, 255, 255]
+    黄色:
+      - lower: [21, 80, 50]
+        upper: [38, 255, 255]
+    绿色:
+      - lower: [35, 60, 40]
+        upper: [85, 255, 255]
+    青色:
+      - lower: [85, 60, 40]
+        upper: [100, 255, 255]
+    蓝色:
+      - lower: [100, 60, 40]
+        upper: [130, 255, 255]
+    紫色:
+      - lower: [130, 50, 40]
+        upper: [160, 255, 255]
+  min_valid_pixels: 50
+  black_value_max: 45
+  white_value_min: 165
+  achromatic_saturation_max: 35

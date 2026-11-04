@@ -3,8 +3,9 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import yaml
 
-from legacy_vision import prepare_legacy_pair
+from legacy_vision import LegacyRecognizer, prepare_legacy_pair
 from vision import decode_yolo_raw, load_class_names
 
 
@@ -76,3 +77,129 @@ class LegacyVisionTests(unittest.TestCase):
                     path.write_text("\n".join(bad_names), encoding="utf-8")
                     with self.assertRaisesRegex(ValueError, message):
                         load_class_names(path, expected_count=26)
+
+
+class FakeBackend:
+    def __init__(self, *outputs):
+        self.outputs = iter(outputs)
+        self.inputs = []
+        self.close_count = 0
+
+    def infer(self, tensor):
+        self.inputs.append(tensor)
+        output = next(self.outputs)
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+    def close(self):
+        self.close_count += 1
+
+
+def _raw(*rows):
+    output = np.zeros((1, 30, 8400), dtype=np.float32)
+    for index, (box, class_id, score) in enumerate(rows):
+        x1, y1, x2, y2 = box
+        output[0, :4, index] = ((x1 + x2) / 2, (y1 + y2) / 2 + 160, x2 - x1, y2 - y1)
+        output[0, 4 + class_id, index] = score
+    return output
+
+
+class LegacyRecognizerTests(unittest.TestCase):
+    def setUp(self):
+        self.config = yaml.safe_load((CLASSES_FILE.parents[1] / "legacy_vision.yaml").read_text(
+            encoding="utf-8"
+        ))
+        self.classes = load_class_names(CLASSES_FILE, expected_count=26)
+        self.left = np.full((320, 320, 3), (100, 0, 0), dtype=np.uint8)
+        self.right = np.full((320, 320, 3), (100, 0, 80), dtype=np.uint8)
+        self.left_box = ((40, 80, 140, 160), 7, 0.7)
+        self.right_box = ((400, 80, 480, 160), 25, 0.9)
+        self.empty = np.full((1, 1, 320, 320), -5, dtype=np.float32)
+        self.ring = self.empty.copy()
+        self.ring[0, 0, 90:150, 100:140] = 5
+        self.ring[0, 0, 110:130, 115:125] = -5
+
+    def make_recognizer(self, raw, *masks):
+        self.detector = FakeBackend(raw)
+        self.segmenter = FakeBackend(*masks) if masks else None
+        return LegacyRecognizer(self.detector, self.segmenter, self.classes, self.config)
+
+    def test_highest_confidence_wins_shape_and_right_overlay_preserves_the_hole(self):
+        left_before, right_before = self.left.copy(), self.right.copy()
+        source = np.hstack((left_before, right_before))
+        recognizer = self.make_recognizer(_raw(self.left_box, self.right_box), self.empty, self.ring)
+        result = recognizer.recognize_pair(self.left, self.right)
+        self.assertEqual(result.detection.class_id, 25)
+        self.assertEqual(result.mask_status, ("empty", "applied"))
+        np.testing.assert_array_equal(result.preview_bgr[120, 440], source[120, 440])
+        self.assertTrue(np.any(result.preview_bgr[100, 430] != source[100, 430]))
+        np.testing.assert_array_equal(result.preview_bgr[100, 110], source[100, 110])
+        np.testing.assert_array_equal(self.left, left_before)
+        np.testing.assert_array_equal(self.right, right_before)
+        self.assertEqual(len(self.detector.inputs), 1)
+        self.assertEqual(self.detector.inputs[0].shape, (1, 3, 640, 640))
+        self.assertEqual(self.segmenter.inputs[1].shape, (1, 3, 320, 320))
+        np.testing.assert_allclose(self.segmenter.inputs[1][0, :, 120, 120], (80 / 255, 0, 100 / 255))
+        self.assertGreaterEqual(result.elapsed_ms, 0)
+
+    def test_no_detection_skips_masks_and_returns_an_unmarked_preview(self):
+        recognizer = self.make_recognizer(_raw())
+        result = recognizer.recognize_pair(self.left, self.right)
+        self.assertIsNone(result.detection)
+        self.assertIsNone(result.color)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.mask_status, ("no_detection", "no_detection"))
+        np.testing.assert_array_equal(result.preview_bgr, np.hstack((self.left, self.right)))
+
+    def test_multiple_left_candidates_skip_only_the_left_overlay(self):
+        extra_left = ((160, 80, 200, 160), 4, 0.6)
+        recognizer = self.make_recognizer(_raw(self.left_box, extra_left, self.right_box), self.ring)
+        result = recognizer.recognize_pair(self.left, self.right)
+        self.assertEqual(result.mask_status, ("ambiguous", "applied"))
+        self.assertEqual(len(self.segmenter.inputs), 1)
+
+    def test_segmentation_exception_and_nonintersecting_mask_preserve_shape(self):
+        far_right_box = ((500, 80, 580, 160), 25, 0.9)
+        recognizer = self.make_recognizer(
+            _raw(self.left_box, far_right_box), RuntimeError("segmentation failed"), self.ring
+        )
+        result = recognizer.recognize_pair(self.left, self.right)
+        self.assertEqual(result.mask_status, ("error", "unmatched"))
+        self.assertEqual(result.detection.class_id, 25)
+        self.assertIsNone(result.error)
+        np.testing.assert_array_equal(result.preview_bgr[100, 430], self.right[100, 110])
+
+    def test_detection_failure_returns_error_without_running_segmentation(self):
+        recognizer = self.make_recognizer(RuntimeError("detector unavailable"), self.ring)
+        result = recognizer.recognize_pair(self.left, self.right)
+        self.assertIn("detector unavailable", result.error)
+        self.assertIsNone(result.detection)
+        self.assertIsNone(result.color)
+        self.assertEqual(len(self.segmenter.inputs), 0)
+
+    def test_cross_seam_tie_assigns_left_and_color_prefers_a_known_view(self):
+        self.right[:] = (10, 0, 10)  # Saturated but below every hue range's value floor.
+        tied_box = ((280, 80, 360, 160), 7, 0.7)
+        recognizer = self.make_recognizer(_raw(tied_box, self.right_box), self.empty, self.empty)
+        result = recognizer.recognize_pair(self.left, self.right)
+        self.assertEqual(result.color.name, "\u84dd\u8272")
+        self.assertEqual(result.color.valid_pixels, 40 * 80)
+        self.assertEqual(result.mask_status, ("empty", "empty"))
+
+    def test_color_ranks_hsv_confidence_before_detection_confidence(self):
+        self.right[80:160, 80:100] = (10, 0, 10)
+        raw = _raw(self.left_box, self.right_box)
+        result = self.make_recognizer(raw).recognize_pair(self.left, self.right)
+        self.assertEqual(result.color.name, "\u84dd\u8272")
+        self.assertEqual(result.mask_status, ("disabled", "disabled"))
+        self.right[:] = (100, 0, 80)
+        result = self.make_recognizer(raw).recognize_pair(self.left, self.right)
+        self.assertEqual(result.color.name, "\u7d2b\u8272")
+
+    def test_close_closes_each_backend_once(self):
+        recognizer = self.make_recognizer(_raw(), self.empty)
+        recognizer.close()
+        recognizer.close()
+        self.assertEqual(self.detector.close_count, 1)
+        self.assertEqual(self.segmenter.close_count, 1)
