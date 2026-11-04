@@ -109,6 +109,7 @@ class ModelDialog(QDialog):
         self.closed = False
         self.busy = False
         self.pending = False
+        self.mutating = False
         self.paths = {}
         self.setWindowTitle('模型管理')
         self.resize(700, 500)
@@ -197,6 +198,8 @@ class ModelDialog(QDialog):
         if not self.pending or self.busy or self.closed: return
         self.pending = False
         self.busy = True
+        self.mutating = True
+        self.status.setText('正在启用模型，请等待结果…')
         self.confirm_button.setEnabled(False)
         self.window._thread.confirm_candidate()
 
@@ -214,25 +217,37 @@ class ModelDialog(QDialog):
         if fixture is None: return
         self.busy = True
         self.window.model_busy = True
+        self.mutating = True
         self.status.setText('正在验证回退…')
         self.window._thread.rollback(fixture)
 
     def on_changed(self, active):
         if self.closed: return
-        self.busy = self.pending = False
+        self.busy = self.pending = self.mutating = False
         self.window.model_busy = False
         for slot, label in self.labels.items():
             label.setText('%s：%s' % (slot, (active.get(slot) or {}).get('version', '未配置')))
+        self.window._invalidate_frame()
         self.status.setText('模型已更新')
 
     def on_failed(self, message):
         if self.closed: return
-        self.busy = self.pending = False
+        self.busy = self.pending = self.mutating = False
         self.window.model_busy = False
         self.confirm_button.setEnabled(False)
         self.status.setText('模型操作失败：' + message)
 
+    def closeEvent(self, event):
+        if self.mutating:
+            self.status.setText('模型操作进行中，请等待结果')
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     def done(self, result):
+        if self.mutating:
+            self.status.setText('模型操作进行中，请等待结果')
+            return
         if not self.closed:
             self.closed = True
             self.confirm_button.setEnabled(False)
@@ -594,6 +609,10 @@ class Window(QMainWindow):
                 self.display(self.frame)
 
     def closeEvent(self, event):
+        if self.model_dialog is not None and self.model_dialog.mutating:
+            self.model_dialog.status.setText('模型操作进行中，请等待结果')
+            event.ignore()
+            return
         if not self._close_ready:
             if not self.closing:
                 self.closing = True

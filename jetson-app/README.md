@@ -8,7 +8,7 @@
 
 - 打开 JPG、PNG、BMP、WebP、MP4、AVI 等图片或录像。
 - 双视图拼接画面按中线拆分，也支持单视图显示。
-- YOLO11 raw 输出解码、23 类 class-aware NMS。
+- 旧版双摄 26 类模型输出解码及类别识别。
 - 表面掩膜恢复并收紧 YOLO 粗框。
 - HSV 颜色识别和左右视图结果合并。
 - TensorRT 8.5 + CUDA Runtime `ctypes` 后端，不依赖 PyCUDA。
