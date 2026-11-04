@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 try:
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import Qt, QTimer, Slot
     from PySide6.QtGui import QImage, QPixmap, QKeySequence, QShortcut
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton,
         QVBoxLayout, QHBoxLayout, QFrame, QFileDialog, QMessageBox, QDialog, QTabWidget,
@@ -19,7 +19,7 @@ try:
     QBUTTON_OK = QDialogButtonBox.StandardButton.Ok
     QBUTTON_CANCEL = QDialogButtonBox.StandardButton.Cancel
 except ImportError:
-    from PyQt5.QtCore import Qt, QTimer
+    from PyQt5.QtCore import Qt, QTimer, pyqtSlot as Slot
     from PyQt5.QtGui import QImage, QPixmap, QKeySequence
     from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton,
         QVBoxLayout, QHBoxLayout, QFrame, QFileDialog, QMessageBox, QDialog, QTabWidget,
@@ -38,6 +38,7 @@ import cv2
 
 from core import ReplayState, save_sample
 from media import MediaSource
+from vision_worker import VisionWorker, default_recognizer_factory
 
 ROOT = Path(__file__).resolve().parent
 STYLE = '''
@@ -101,14 +102,25 @@ def panel(title, child):
 
 
 class Window(QMainWindow):
-    def __init__(self):
+
+    def __init__(self, recognizer_factory=None):
         super().__init__()
-        self.setWindowTitle('YLERS · Orin 分拣操作台 — 离线版')
+        self.setWindowTitle('YLERS · Xavier NX 分拣操作台 — 离线版')
         self.resize(1024, 600)
         self.setMinimumSize(1024, 600)
         self.source = MediaSource()
         self.state = ReplayState()
         self.frame = None
+        self.frame_revision = 0
+        self.request_sequence = 0
+        self.active_request_id = None
+        self.closing = False
+        self._close_ready = False
+        self._thread = VisionWorker(recognizer_factory or default_recognizer_factory, self)
+        self._thread.completed.connect(self._on_recognized)
+        self._thread.failed.connect(self._on_recognition_failed)
+        self._thread.finished.connect(self._worker_thread_finished)
+        self._thread.start()
         self.last_saved = None
         self.layout_mode = '双视图拼接（中线拆分）'
         self.logs = []
@@ -156,8 +168,12 @@ class Window(QMainWindow):
         self.result_label = QLabel('等待识别')
         self.result_label.setObjectName('result')
         fields.addWidget(self.result_label)
-        fields.addWidget(QLabel('颜色：—　置信度：—'))
-        fields.addWidget(QLabel('检测模型：未接入\n表面掩膜：未就绪'))
+        self.color_label = QLabel('颜色：—　置信度：—')
+        fields.addWidget(self.color_label)
+        self.mask_status_label = QLabel('左覆膜：未就绪　右覆膜：未就绪')
+        fields.addWidget(self.mask_status_label)
+        self.preview_view = ImageView('识别预览将在此显示')
+        fields.addWidget(self.preview_view)
         self.status_label = QLabel('请先打开图片或录像')
         self.status_label.setObjectName('muted')
         fields.addWidget(self.status_label)
@@ -217,6 +233,7 @@ class Window(QMainWindow):
             self.load_file(path)
 
     def load_file(self, path):
+        self._invalidate_frame()
         self.timer.stop()
         try:
             self.source.open(path)
@@ -240,6 +257,7 @@ class Window(QMainWindow):
             return False
 
     def display(self, frame):
+        self._invalidate_frame()
         self.frame = frame.copy()
         if self.layout_mode.startswith('双'):
             midpoint = frame.shape[1]//2
@@ -295,8 +313,77 @@ class Window(QMainWindow):
         self.display(frame)
 
     def recognize(self):
-        self.log('检测与掩膜模型尚未接入；本阶段仅验证真实媒体显示和存档。')
+        if self.frame is None:
+            self.status_label.setText('请先加载双摄拼图')
+            return
+        if not self.layout_mode.startswith('双'):
+            self.status_label.setText('手动识别需要双摄拼图布局')
+            return
+        if self.active_request_id is not None or self.closing:
+            return
+        self.pause()
+        midpoint = self.frame.shape[1] // 2
+        if midpoint == 0 or midpoint == self.frame.shape[1]:
+            self.status_label.setText('手动识别需要双摄拼图布局')
+            return
+        self.request_sequence += 1
+        self.active_request_id = self.request_sequence
+        self.status_label.setText('正在识别…')
+        self.buttons['手动识别'].setEnabled(False)
+        self._thread.recognize(self.active_request_id, self.frame_revision,
+                               self.frame[:, :midpoint].copy(), self.frame[:, midpoint:].copy())
+
+    def _invalidate_frame(self):
+        self.frame_revision += 1
+        if hasattr(self, 'preview_view'):
+            self.preview_view.frame = None
+            self.preview_view.refresh()
+            self.result_label.setText('等待识别')
+            self.color_label.setText('颜色：—　置信度：—')
+            self.mask_status_label.setText('左覆膜：未就绪　右覆膜：未就绪')
+
+    @Slot(int, int, object)
+    def _on_recognized(self, request_id, frame_revision, result):
+        if self.closing or request_id != self.active_request_id:
+            return
+        self.active_request_id = None
+        self.buttons['手动识别'].setEnabled(True)
+        if frame_revision != self.frame_revision:
+            return
+        if result.error:
+            self.result_label.setText('识别失败')
+            self.status_label.setText(result.error)
+            return
+        detection = result.detection
+        self.result_label.setText('无目标' if detection is None else str(getattr(detection, 'shape', getattr(detection, 'class_name', '类别 %s' % detection.class_id))))
+        color = result.color
+        self.color_label.setText('颜色：%s　置信度：%s' % (color.name, '%.1f%%' % (color.confidence * 100)) if color else '颜色：未知　置信度：—')
+        self.mask_status_label.setText('左覆膜：%s　右覆膜：%s' % tuple(result.mask_status))
+        self.preview_view.show_frame(result.preview_bgr)
+        self.status_label.setText('识别完成 · %.1f ms' % result.elapsed_ms)
+
+    @Slot(int, int, str)
+    def _on_recognition_failed(self, request_id, frame_revision, message):
+        if self.closing or request_id != self.active_request_id:
+            return
+        self.active_request_id = None
+        self.buttons['手动识别'].setEnabled(True)
+        if frame_revision != self.frame_revision:
+            return
         self.result_label.setText('模型未就绪')
+        self.status_label.setText(message)
+        self.log('识别失败：' + message)
+
+    def _worker_thread_finished(self):
+        # QThread.finished can precede native thread-local cleanup. Poll on the
+        # UI thread until the native thread is joined, without blocking it.
+        if self._thread is not None and not self._thread.wait(0):
+            QTimer.singleShot(10, self._worker_thread_finished)
+            return
+        self._thread = None
+        if self.closing:
+            self._close_ready = True
+            self.close()
 
     def save(self):
         if self.frame is None:
@@ -353,6 +440,14 @@ class Window(QMainWindow):
                 self.display(self.frame)
 
     def closeEvent(self, event):
+        if not self._close_ready:
+            if not self.closing:
+                self.closing = True
+                self.timer.stop()
+                self.source.close()
+                self._thread.shutdown()
+            event.ignore()
+            return
         self.timer.stop()
         self.source.close()
         super().closeEvent(event)
