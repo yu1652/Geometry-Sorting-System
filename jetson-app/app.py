@@ -101,11 +101,153 @@ def panel(title, child):
     return box
 
 
+class ModelDialog(QDialog):
+    """Offline model trial and explicit activation."""
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self.closed = False
+        self.busy = False
+        self.pending = False
+        self.paths = {}
+        self.setWindowTitle('模型管理')
+        self.resize(700, 500)
+        layout = QVBoxLayout(self)
+        self.labels = {}
+        try:
+            active = window._thread._store.read_active()['active']
+        except Exception:
+            active = {}
+        for slot, title in (('side_detector', '形状'), ('surface_mask', '掩膜')):
+            row = QHBoxLayout()
+            record = active.get(slot) or {}
+            label = QLabel('%s：%s（未验证）' % (title, record.get('version', '默认/未配置')))
+            self.labels[slot] = label
+            row.addWidget(label, 1)
+            choose = QPushButton('选择模型')
+            choose.clicked.connect(lambda checked=False, s=slot: self.choose(s))
+            row.addWidget(choose)
+            trial = QPushButton('试跑')
+            trial.clicked.connect(lambda checked=False, s=slot: self.start_trial(s))
+            row.addWidget(trial)
+            layout.addLayout(row)
+        self.status = QLabel('请选择候选 manifest 和双视图样本')
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.preview = ImageView('候选预览')
+        layout.addWidget(self.preview, 1)
+        row = QHBoxLayout()
+        self.confirm_button = QPushButton('确认启用')
+        self.confirm_button.setEnabled(False)
+        self.confirm_button.clicked.connect(self.confirm)
+        row.addWidget(self.confirm_button)
+        cancel = QPushButton('取消候选')
+        cancel.clicked.connect(self.cancel)
+        row.addWidget(cancel)
+        rollback = QPushButton('回退')
+        rollback.clicked.connect(self.rollback)
+        row.addWidget(rollback)
+        layout.addLayout(row)
+        window._thread.model_trial_ready.connect(self.on_trial)
+        window._thread.model_changed.connect(self.on_changed)
+        window._thread.model_failed.connect(self.on_failed)
+        window.model_dialog = self
+
+    def fixture(self):
+        w = self.window
+        if w.frame is None or not w.layout_mode.startswith('双') or w.frame.shape[1] < 2:
+            self.status.setText('请先加载双视图样本')
+            return None
+        w.pause()
+        mid = w.frame.shape[1] // 2
+        return (w.frame[:, :mid].copy(), w.frame[:, mid:].copy())
+
+    def available(self):
+        return not self.closed and not self.busy and self.window.active_request_id is None and not self.window.closing
+
+    def choose(self, slot):
+        if not self.available() or self.pending: return
+        path, _ = QFileDialog.getOpenFileName(self, '选择 manifest', '', 'JSON (*.json)')
+        if path:
+            self.paths[slot] = path
+            self.status.setText(path)
+
+    def start_trial(self, slot):
+        if not self.available() or self.pending: return
+        if slot not in self.paths:
+            self.status.setText('请先选择候选 manifest')
+            return
+        fixture = self.fixture()
+        if fixture is None: return
+        self.busy = True
+        self.window.model_busy = True
+        self.status.setText('正在试跑…')
+        self.window._thread.trial_candidate(self.paths[slot], slot, fixture)
+
+    def on_trial(self, payload):
+        if self.closed or not self.busy: return
+        self.busy = False
+        self.pending = True
+        result = payload['result']
+        self.status.setText('%s / %s · %s · %.1f ms；请检查后确认' % (payload['slot'], payload['version'], ', '.join(result.mask_status), result.elapsed_ms))
+        self.preview.show_frame(result.preview_bgr)
+        self.confirm_button.setEnabled(True)
+
+    def confirm(self):
+        if not self.pending or self.busy or self.closed: return
+        self.pending = False
+        self.busy = True
+        self.confirm_button.setEnabled(False)
+        self.window._thread.confirm_candidate()
+
+    def cancel(self):
+        if self.closed or self.busy: return
+        self.window._thread.cancel_candidate()
+        self.pending = False
+        self.window.model_busy = False
+        self.confirm_button.setEnabled(False)
+        self.status.setText('候选已取消')
+
+    def rollback(self):
+        if not self.available() or self.pending: return
+        fixture = self.fixture()
+        if fixture is None: return
+        self.busy = True
+        self.window.model_busy = True
+        self.status.setText('正在验证回退…')
+        self.window._thread.rollback(fixture)
+
+    def on_changed(self, active):
+        if self.closed: return
+        self.busy = self.pending = False
+        self.window.model_busy = False
+        for slot, label in self.labels.items():
+            label.setText('%s：%s' % (slot, (active.get(slot) or {}).get('version', '未配置')))
+        self.status.setText('模型已更新')
+
+    def on_failed(self, message):
+        if self.closed: return
+        self.busy = self.pending = False
+        self.window.model_busy = False
+        self.confirm_button.setEnabled(False)
+        self.status.setText('模型操作失败：' + message)
+
+    def done(self, result):
+        if not self.closed:
+            self.closed = True
+            self.confirm_button.setEnabled(False)
+            self.window._thread.cancel_candidate()
+            # A queued cancel follows any in-flight trial on the worker.
+            self.window.model_busy = self.busy
+            self.window.model_dialog = None
+        super().done(result)
+
+
 class Window(QMainWindow):
 
     def __init__(self, recognizer_factory=None):
         super().__init__()
-        self.setWindowTitle('YLERS · Xavier NX 分拣操作台 — 离线版')
+        self.setWindowTitle('YLERS · Jetson Xavier NX 视觉操作台 — 离线版')
         self.resize(1024, 600)
         self.setMinimumSize(1024, 600)
         self.source = MediaSource()
@@ -115,11 +257,16 @@ class Window(QMainWindow):
         self.request_sequence = 0
         self.active_request_id = None
         self.closing = False
+        self.model_busy = False
+        self.model_dialog = None
         self._close_ready = False
         self._thread = VisionWorker(recognizer_factory or default_recognizer_factory, self)
         self._thread.completed.connect(self._on_recognized)
         self._thread.failed.connect(self._on_recognition_failed)
         self._thread.finished.connect(self._worker_thread_finished)
+        self._thread.model_trial_ready.connect(self._discard_closed_model_operation)
+        self._thread.model_changed.connect(self._discard_closed_model_operation)
+        self._thread.model_failed.connect(self._discard_closed_model_operation)
         self._thread.start()
         self.last_saved = None
         self.layout_mode = '双视图拼接（中线拆分）'
@@ -319,7 +466,7 @@ class Window(QMainWindow):
         if not self.layout_mode.startswith('双'):
             self.status_label.setText('手动识别需要双摄拼图布局')
             return
-        if self.active_request_id is not None or self.closing:
+        if self.active_request_id is not None or self.closing or self.model_busy:
             return
         self.pause()
         midpoint = self.frame.shape[1] // 2
@@ -374,6 +521,10 @@ class Window(QMainWindow):
         self.status_label.setText(message)
         self.log('识别失败：' + message)
 
+    def _discard_closed_model_operation(self, unused):
+        if self.model_dialog is None:
+            self.model_busy = False
+
     def _worker_thread_finished(self):
         # QThread.finished can precede native thread-local cleanup. Poll on the
         # UI thread until the native thread is joined, without blocking it.
@@ -413,12 +564,15 @@ class Window(QMainWindow):
         combo.addItems(['双视图拼接（中线拆分）', '单视图（显示在左侧）'])
         combo.setCurrentText(self.layout_mode)
         form.addRow('媒体布局', combo)
-        form.addRow('目标平台', QLabel('Jetson Orin NX 16GB / JetPack待设备检查'))
+        form.addRow('目标平台', QLabel('Jetson Xavier NX / JetPack 5（板端实测待完成）'))
         form.addRow('相机 / 串口', QLabel('未连接 / 机械输出关闭'))
-        form.addRow('形状 / 掩膜模型', QLabel('未接入 / 未就绪'))
+        form.addRow('形状 / 掩膜模型', QLabel('侧视：26 类旧模型；覆膜默认关闭，候选模型须试跑并确认'))
         path_label = QLabel(str(ROOT/'data/samples'))
         path_label.setWordWrap(True)
         form.addRow('样本保存目录', path_label)
+        model_button = QPushButton('模型管理')
+        model_button.clicked.connect(lambda: ModelDialog(self).exec() if not self.model_busy and self.active_request_id is None else None)
+        form.addRow('模型', model_button)
         tabs.addTab(page, '设置')
         log = QTextEdit()
         log.setReadOnly(True)
@@ -443,6 +597,9 @@ class Window(QMainWindow):
         if not self._close_ready:
             if not self.closing:
                 self.closing = True
+                if self.model_dialog is not None:
+                    self.model_dialog.reject()
+                self._thread.cancel_candidate()
                 self.timer.stop()
                 self.source.close()
                 self._thread.shutdown()
@@ -454,7 +611,7 @@ class Window(QMainWindow):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Orin分拣操作台阶段1：离线媒体回放')
+    parser = argparse.ArgumentParser(description='Xavier NX视觉操作台：离线媒体回放')
     parser.add_argument('--file', type=Path)
     parser.add_argument('--fullscreen', action='store_true')
     args = parser.parse_args()
