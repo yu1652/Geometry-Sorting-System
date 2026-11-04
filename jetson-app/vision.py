@@ -96,10 +96,14 @@ def decode_yolo_raw(
     class_names: Sequence[str],
     confidence_threshold: float = 0.25,
     iou_threshold: float = 0.7,
+    *,
+    expected_count: int = 23,
 ) -> List[Detection]:
     """Decode YOLO11 [1, 4 + nc, N] output and run class-aware NMS."""
-    if len(class_names) != 23:
-        raise ValueError("class_names must contain exactly 23 entries")
+    if expected_count not in (23, 26):
+        raise ValueError("expected_count must be 23 or 26")
+    if len(class_names) != expected_count:
+        raise ValueError("class_names must contain exactly %d entries" % expected_count)
     if not isinstance(output, np.ndarray) or output.ndim != 3 or output.shape[0] != 1:
         raise ValueError("output must have shape [1, 4+nc, N]")
     if output.shape[1] != 4 + len(class_names):
@@ -154,24 +158,28 @@ def decode_yolo_raw(
 
 
 def load_class_names(path, expected_count: int = 23) -> List[str]:
-    """Load runtime class names while allowing only trailing training reserves."""
-    if expected_count != 23:
-        raise ValueError("expected_count must be 23 for the runtime model")
+    """Load class names, allowing a training reserve tail for the 23-class model."""
+    if expected_count not in (23, 26):
+        raise ValueError("expected_count must be 23 or 26")
     try:
         entries = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError as exc:
         raise ValueError("could not read class names") from exc
     entries = [entry.strip() for entry in entries]
     if len(entries) < expected_count or any(not entry for entry in entries):
-        raise ValueError("class file must contain 23 non-empty runtime names")
+        raise ValueError("class file must contain %d non-empty runtime names" % expected_count)
 
     runtime_names = entries[:expected_count]
     allowed_reserved = {"reserved_23", "reserved_24", "reserved_25"}
-    if any(name in allowed_reserved for name in runtime_names):
+    if any(name in allowed_reserved for name in runtime_names) or (
+        expected_count == 26 and any(name.startswith("reserved_") for name in runtime_names)
+    ):
         raise ValueError("reserved entries are not runtime classes")
     if len(set(runtime_names)) != expected_count:
         raise ValueError("runtime class names must be unique")
     reserved_tail = entries[expected_count:]
+    if expected_count == 26 and reserved_tail:
+        raise ValueError("class file must contain exactly 26 entries")
     if reserved_tail and reserved_tail != ["reserved_23", "reserved_24", "reserved_25"]:
         raise ValueError("reserved entries must be the complete ordered tail")
     return runtime_names

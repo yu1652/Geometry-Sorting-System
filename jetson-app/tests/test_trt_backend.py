@@ -371,6 +371,43 @@ class BackendContractTests(unittest.TestCase):
         self.assertIs(backend.engine, engine)
         self.assertIs(backend.context, engine.context)
 
+    def test_legacy_engine_uses_640_input_and_26_class_output(self):
+        import trt_backend
+
+        events = []
+        engine = FakeEngine(
+            events, kind="yolo", input_shape=(1, 3, 640, 640), output_shape=(1, 30, 8400)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            engine_path = Path(directory) / "test.engine"
+            engine_path.write_bytes(b"engine")
+            with mock.patch.object(trt_backend.importlib, "import_module", return_value=FakeTrt(engine)):
+                with mock.patch.object(trt_backend, "_load_cuda_runtime", return_value=FakeCuda(events)):
+                    backend = trt_backend.create_backend(engine_path, "yolo_legacy")
+        self.addCleanup(backend.close)
+        output = backend.infer(np.zeros((1, 3, 640, 640), dtype=np.float32))
+        self.assertEqual(output.shape, (1, 30, 8400))
+        with self.assertRaises(trt_backend.EngineContractError):
+            trt_backend.TensorRTBackend(b"engine", "yolo", FakeTrt(engine), FakeCuda([]))
+
+    def test_legacy_engine_rejects_bad_bindings_before_buffer_allocation(self):
+        from trt_backend import EngineContractError, TensorRTBackend
+
+        for options in (
+            {"input_name": "input"},
+            {"input_shape": (-1, 3, 640, 640)},
+            {"output_shape": (1, 30, -1)},
+            {"output_shape": (1, 8400, 30)},
+        ):
+            with self.subTest(options=options):
+                events = []
+                shapes = dict(input_shape=(1, 3, 640, 640), output_shape=(1, 30, 8400))
+                shapes.update(options)
+                engine = FakeEngine(events, kind="yolo", **shapes)
+                with self.assertRaises(EngineContractError):
+                    TensorRTBackend(b"engine", "yolo_legacy", FakeTrt(engine), FakeCuda(events))
+                self.assertFalse(any(event[0] == "malloc" for event in events))
+
     def test_yolo_requires_images_input_binding_name(self):
         from trt_backend import EngineContractError, TensorRTBackend
 

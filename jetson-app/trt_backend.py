@@ -20,6 +20,8 @@ CUDA_STREAM_NON_BLOCKING = 1
 
 _INPUT_SHAPE = (1, 3, 320, 320)
 _YOLO_OUTPUT_SHAPE = (1, 27, 2100)
+_YOLO_LEGACY_INPUT_SHAPE = (1, 3, 640, 640)
+_YOLO_LEGACY_OUTPUT_SHAPE = (1, 30, 8400)
 _MASK_OUTPUT_SHAPE = (1, 1, 320, 320)
 
 
@@ -200,8 +202,8 @@ class TensorRTBackend:
     """One synchronous TensorRT engine owned by one worker thread."""
 
     def __init__(self, engine_bytes, model_kind, trt_module, cuda_runtime, device=0):
-        if model_kind not in ("yolo", "mask"):
-            raise ValueError("model_kind must be 'yolo' or 'mask'")
+        if model_kind not in ("yolo", "yolo_legacy", "mask"):
+            raise ValueError("model_kind must be 'yolo', 'yolo_legacy', or 'mask'")
         if int(device) != 0:
             raise ValueError("this backend is fixed to CUDA device 0")
         self.model_kind = model_kind
@@ -271,7 +273,7 @@ class TensorRTBackend:
                 "expected exactly one optimization profile, found %d" % profile_count
             )
 
-        expected_input_name = "images" if self.model_kind == "yolo" else "input"
+        expected_input_name = "input" if self.model_kind == "mask" else "images"
         input_index = int(engine.get_binding_index(expected_input_name))
         if input_index < 0 or input_index >= int(engine.num_bindings):
             raise EngineContractError(
@@ -299,19 +301,26 @@ class TensorRTBackend:
         declared_output_shape = tuple(
             int(value) for value in engine.get_binding_shape(output_index)
         )
-        if self.model_kind == "yolo":
-            if input_shape != _INPUT_SHAPE:
+        if self.model_kind != "mask":
+            if self.model_kind == "yolo_legacy":
+                expected_input_shape = _YOLO_LEGACY_INPUT_SHAPE
+                expected_output_shape = _YOLO_LEGACY_OUTPUT_SHAPE
+            else:
+                expected_input_shape = _INPUT_SHAPE
+                expected_output_shape = _YOLO_OUTPUT_SHAPE
+            if input_shape != expected_input_shape:
                 raise EngineContractError(
                     "unexpected YOLO input shape %r; expected %r"
-                    % (input_shape, _INPUT_SHAPE)
+                    % (input_shape, expected_input_shape)
                 )
-            if declared_output_shape != _YOLO_OUTPUT_SHAPE:
+            if declared_output_shape != expected_output_shape:
                 raise EngineContractError(
                     "unexpected YOLO output shape %r; expected %r"
-                    % (declared_output_shape, _YOLO_OUTPUT_SHAPE)
+                    % (declared_output_shape, expected_output_shape)
                 )
-            self.output_shape = _YOLO_OUTPUT_SHAPE
+            self.output_shape = expected_output_shape
         else:
+            expected_input_shape = _INPUT_SHAPE
             if len(input_shape) != 4 or any(
                 actual not in (-1, expected)
                 for actual, expected in zip(input_shape, _INPUT_SHAPE)
@@ -357,7 +366,7 @@ class TensorRTBackend:
 
         self.input_index = input_index
         self.output_index = output_index
-        self.input_shape = _INPUT_SHAPE
+        self.input_shape = expected_input_shape
         self.input_dtype = input_dtype
         self.output_dtype = output_dtype
 
