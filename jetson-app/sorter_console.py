@@ -104,7 +104,8 @@ class CalibrationDialog(QDialog):
     def __init__(self, console, rows):
         super().__init__(console)
         self.console = console
-        self.setWindowTitle("XY 九点标定 · 仿真")
+        self.simulation = getattr(console, 'simulation_mode', True)
+        self.setWindowTitle("XY 九点标定 · 仿真" if self.simulation else "XY 九点标定 · 实机")
         self.resize(960, 490)
         outer = QVBoxLayout(self)
         work = QHBoxLayout()
@@ -117,7 +118,8 @@ class CalibrationDialog(QDialog):
         self.points.currentCellChanged.connect(self.draw_points)
         self.points.itemChanged.connect(self.draw_points)
         work.addWidget(self.points, 1)
-        self.status = QLabel("先确认仿真零点，再测试 GOTO 或升降。")
+        self.status = QLabel("先确认仿真零点，再测试 GOTO 或升降。" if self.simulation else
+                             "手动对零并确认后，才可测试 GOTO 和升降；机械坐标单位为毫米。")
         outer.addWidget(self.status)
         controls = QHBoxLayout()
         controls.addWidget(button("GOTO 选中点", self.goto_selected))
@@ -140,13 +142,17 @@ class CalibrationDialog(QDialog):
                 for c, value in enumerate(row):
                     item = QTableWidgetItem(str(value) if c == 0 else format(float(value), "g"))
                     if c == 0:
-                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                        editable = getattr(Qt, 'ItemIsEditable', None)
+                        if editable is None:
+                            editable = Qt.ItemFlag.ItemIsEditable
+                        item.setFlags(item.flags() & ~editable)
                     self.points.setItem(r, c, item)
         finally:
             self.points.blockSignals(blocked)
 
     def open_legacy(self):
-        path, _ = QFileDialog.getOpenFileName(self, "导入旧版九点标定", "", "标定文件 (*.yaml *.yml)")
+        folder = ROOT / 'imports'
+        path, _ = QFileDialog.getOpenFileName(self, "导入旧版九点标定", str(folder) if folder.is_dir() else "", "标定文件 (*.yaml *.yml)")
         if path:
             self.import_points(path)
 
@@ -187,8 +193,8 @@ class CalibrationDialog(QDialog):
 
     def move_pusher(self, down):
         try:
-            self.console._command(lambda: self.console.machine.set_pusher(down),
-                                  "推板下降 · 仿真" if down else "推板抬起 · 仿真")
+            description = "推板下降" if down else "推板抬起"
+            self.console._command(lambda: self.console.machine.set_pusher(down), description)
             self.status.setText(self.console.statusBar().currentMessage())
         except (ValueError, RuntimeError) as exc:
             self.status.setText(str(exc))
@@ -196,12 +202,12 @@ class CalibrationDialog(QDialog):
     def save_points(self):
         try:
             self.console.save_calibration(calibration_rows(self.points))
-            self.status.setText("已保存仿真标定")
+            self.status.setText("已保存仿真标定" if self.simulation else "已保存标定，请实测九点后确认")
         except (AttributeError, OSError, ValueError) as exc:
             self.status.setText(str(exc))
 
     def done(self, result):
-        if self.console.machine.snapshot().pusher_down:
+        if self.console.machine.snapshot().pusher_down or getattr(self.console.machine, 'pending', None) == 'down':
             self.move_pusher(False)
         super().done(result)
 

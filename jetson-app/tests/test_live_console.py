@@ -1,0 +1,254 @@
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import app
+import numpy as np
+
+APP = app.QApplication.instance() or app.QApplication([])
+
+
+class FakePort:
+    def __init__(self):
+        self.data = b''
+        self.writes = []
+        self.closed = False
+
+    def read(self, size):
+        data, self.data = self.data[:size], self.data[size:]
+        return data
+
+    def write(self, data):
+        self.writes.append(data)
+        return len(data)
+
+    def close(self):
+        self.closed = True
+
+
+class FakeVision:
+    def recognize(self, token):
+        return True
+
+    def locate(self, *args):
+        return True
+
+    def shutdown(self):
+        pass
+
+
+class LiveConsoleTests(unittest.TestCase):
+    def setUp(self):
+        from live_console import LiveWindow
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.window = LiveWindow(data_dir=Path(self.folder.name))
+        self.addCleanup(self.window.close)
+
+    def test_default_has_two_pages_and_no_connection_or_sample_calibration_authority(self):
+        window = self.window
+        self.assertEqual(window.pages.count(), 2)
+        self.assertIn('实机', window.windowTitle())
+        self.assertIsNone(window.vision)
+        self.assertIsNone(window.serial_port)
+        self.assertFalse(window.calibration_confirmed.isChecked())
+        self.assertFalse(window.machine.snapshot().origin_confirmed)
+        self.assertFalse(window.start())
+        for name in ('运行', '复位', '退出'):
+            self.assertEqual(window.actions[name].text(), name)
+        window.show_competition()
+        self.assertIs(window.pages.currentWidget(), window.competition_page)
+        window.show_debug()
+        self.assertIs(window.pages.currentWidget(), window.debug_page)
+
+    def test_actual_camera_role_order_and_saved_calibration_still_requires_validation(self):
+        window = self.window
+        self.assertIn('2.1:', window.sources['left'])
+        self.assertIn('2.2:', window.sources['right'])
+        self.assertIn('2.4:', window.sources['top'])
+        window.save_calibration(window.calibration_rows)
+        value = json.loads(window.calibration_path.read_text(encoding='utf8'))
+        self.assertEqual(value['mode'], 'live')
+        self.assertEqual(len(value['points']), 9)
+        self.assertFalse(window.calibration_confirmed.isChecked())
+        dialog = window.create_calibration_dialog()
+        self.addCleanup(dialog.reject)
+        self.assertNotIn('仿真', dialog.windowTitle())
+        self.assertEqual(dialog.points.rowCount(), 9)
+
+    def test_manual_result_does_not_count_and_stale_result_is_discarded(self):
+        window = self.window
+        result = SimpleNamespace(
+            error=None, detection=SimpleNamespace(class_name='yuan_zhu', confidence=.9),
+            color=SimpleNamespace(name='蓝色', confidence=.8, valid_pixels=120),
+            preview_bgr=np.zeros((320, 640, 3), np.uint8), elapsed_ms=100,
+        )
+        window._job = (1, window.machine.epoch, 'manual')
+        window.on_recognized(1, result)
+        self.assertIn('yuan_zhu', window.result_label.text())
+        self.assertEqual(window.records.rowCount(), 0)
+        self.assertEqual(window.machine.snapshot().completed_count, 0)
+        window._job = (2, window.machine.epoch, 'manual')
+        window.machine.disconnect()
+        window.result_label.setText('新状态')
+        window.on_recognized(2, result)
+        self.assertEqual(window.result_label.text(), '新状态')
+
+    def test_binding_validation_rejects_duplicate_and_unknown_class_before_write(self):
+        window = self.window
+        rows = [{'shape': 'yuan_zhu', 'color': '蓝色', 'bin': 1}]
+        window.save_bindings(rows)
+        before = window.bindings_path.read_bytes()
+        with self.assertRaises(ValueError):
+            window.save_bindings(rows + [dict(rows[0], bin=2)])
+        self.assertEqual(window.bindings_path.read_bytes(), before)
+        with self.assertRaises(ValueError):
+            window.save_bindings([dict(rows[0], shape='wrong_class')])
+
+    def ready_manual_controller(self):
+        from live_control import LiveController
+        sent = []
+        controller = self.window.machine = LiveController(sent.append)
+        controller.begin_handshake()
+        for line in ('PONG', 'VERSION,ESP32_SORTER_XY_PUSHER,0.1.0', 'STATUS,MCU,WAIT_START,0,0,77'):
+            controller.handle_mcu(line)
+        self.assertTrue(controller.confirm_origin())
+        controller.handle_mcu('READY')
+        self.assertEqual(controller.snapshot().state, 'armed')
+        return sent
+
+    def test_closing_calibration_while_down_is_pending_queues_up(self):
+        sent = self.ready_manual_controller()
+        dialog = self.window.create_calibration_dialog()
+        dialog.move_pusher(True)
+        self.assertEqual(self.window.machine.pending, 'down')
+        self.assertFalse(self.window.machine.snapshot().pusher_down)
+        dialog.reject()
+        self.assertEqual(sent[-1], 'PUSHER,UP')
+        self.window.machine.handle_mcu('STATUS,PUSHER_DOWN')
+        self.assertEqual(self.window.machine.pending, 'up')
+        self.window.machine.handle_mcu('STATUS,PUSHER_UP')
+        self.assertIsNone(self.window.machine.pending)
+
+    def test_disconnect_keeps_port_open_until_real_stop_ack(self):
+        from esp32_serial import SerialLineTransport
+        self.ready_manual_controller()
+        port = self.window.serial_port = FakePort()
+        self.window.transport = SerialLineTransport(port)
+        self.addCleanup(self.window._finish_serial_close)
+        self.window.close_serial()
+        self.assertFalse(port.closed)
+        port.data = b'STATUS,MCU,STOP,bad\n'
+        self.window.poll_serial()
+        self.assertFalse(port.closed)
+        port.data = b'STATUS,STOP\n'
+        self.window.poll_serial()
+        self.assertTrue(port.closed)
+        self.assertIsNone(self.window.serial_port)
+        self.assertFalse(self.window.machine.snapshot().origin_confirmed)
+
+    def test_reset_waits_for_stop_ack_before_prompting_for_manual_origin(self):
+        from esp32_serial import SerialLineTransport
+        window = self.window
+        sent = self.ready_manual_controller()
+        sent.clear()
+        port = window.serial_port = FakePort()
+        window.transport = SerialLineTransport(port)
+        self.addCleanup(window._finish_serial_close)
+        with patch.object(window, 'confirm_origin') as confirm:
+            self.assertTrue(window.reset())
+            self.assertNotIn('RESET', sent)
+            self.assertFalse(confirm.called)
+            port.data = b'STATUS,STOP\n'
+            window.poll_serial()
+            APP.processEvents()
+            confirm.assert_called_once()
+
+    def test_cannot_reconnect_serial_while_closing(self):
+        with patch.object(self.window, '_serial_factory') as factory:
+            with patch.object(self.window, '_closing', True):
+                self.window.connect_serial()
+            factory.assert_not_called()
+
+    def test_stop_cancels_already_queued_reset_prompt(self):
+        self.ready_manual_controller()
+        epoch = self.window.machine.epoch
+        self.window.stop()
+        with patch.object(self.window, 'confirm_origin') as confirm:
+            self.window._confirm_reset(epoch)
+            confirm.assert_not_called()
+
+    def test_invalid_saved_calibration_cannot_authorize_default_points(self):
+        from live_console import LiveWindow
+        self.window.calibration_path.write_text('{"mode":"live","points":[]}', encoding='utf8')
+        restored = LiveWindow(data_dir=self.window.data_dir)
+        self.addCleanup(restored.close)
+        self.assertFalse(restored.calibration_valid)
+        restored.calibration_confirmed.setChecked(True)
+        restored.vision = FakeVision()
+        restored._frames_at = time.monotonic()
+        self.addCleanup(setattr, restored, 'vision', None)
+        self.assertFalse(restored.manual_locate())
+        self.assertIsNone(restored._job)
+
+    def test_vision_submit_failure_clears_job(self):
+        def reject_request(token):
+            raise RuntimeError('submit failed')
+        self.window.vision = SimpleNamespace(recognize=reject_request)
+        self.window._frames_at = time.monotonic()
+        self.addCleanup(setattr, self.window, 'vision', None)
+        self.assertFalse(self.window.manual_recognize())
+        self.assertIsNone(self.window._job)
+
+    def test_models_force_raw_mode_and_block_reconnection(self):
+        window = self.window
+        process = SimpleNamespace(poll=lambda: None)
+        with patch('live_console.subprocess.Popen', return_value=process) as spawn:
+            window.open_models()
+        self.assertIn('--raw', spawn.call_args[0][0])
+        window.connect_cameras()
+        window.connect_serial()
+        self.assertIsNone(window.vision)
+        self.assertIsNone(window.serial_port)
+
+    def test_automatic_cycle_counts_only_real_done(self):
+        from esp32_serial import SerialLineTransport
+        window = self.window
+        sent = self.ready_manual_controller()
+        window.vision = FakeVision()
+        self.addCleanup(setattr, window, 'vision', None)
+        window._frames_at = time.monotonic()
+        window.save_calibration(window.calibration_rows)
+        window.calibration_confirmed.setChecked(True)
+        window.save_bindings([{'shape': 'yuan_zhu', 'color': '蓝色', 'bin': 1}])
+        self.assertTrue(window.start())
+        window.machine.handle_mcu('STATUS,HOST_READY')
+        window.machine.handle_mcu('STATUS,START')
+        window.machine.handle_mcu('PUSH?')
+        window._dispatch_vision()
+        window.on_located(window._job[0], (50, 50))
+        window.machine.handle_mcu('SCAN')
+        window._dispatch_vision()
+        result = SimpleNamespace(error=None,
+            detection=SimpleNamespace(class_name='yuan_zhu', confidence=.9),
+            color=SimpleNamespace(name='蓝色', confidence=.8, valid_pixels=100),
+            preview_bgr=np.zeros((320, 640, 3), np.uint8), elapsed_ms=100)
+        window.on_recognized(window._job[0], result)
+        self.assertIn('SORT,1', sent)
+        self.assertEqual(window.records.rowCount(), 0)
+        port = window.serial_port = FakePort()
+        window.transport = SerialLineTransport(port)
+        self.addCleanup(window._finish_serial_close)
+        port.data = b'DONE\nDONE\n'
+        window.poll_serial()
+        self.assertEqual(window.records.rowCount(), 1)
+        self.assertEqual(window.total_label.text(), '本次成功总数 1')
+        self.assertTrue((window.data_dir / 'live_results.jsonl').is_file())
+
+
+if __name__ == '__main__':
+    unittest.main()

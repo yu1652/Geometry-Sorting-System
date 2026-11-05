@@ -653,7 +653,9 @@ def main():
     parser = argparse.ArgumentParser(description='Xavier NX视觉操作台：离线媒体回放')
     parser.add_argument('--file', type=Path)
     parser.add_argument('--fullscreen', action='store_true')
-    parser.add_argument('--preprocessed', action='store_true', help='输入为已处理的 640×320 双摄特征拼图')
+    input_type = parser.add_mutually_exclusive_group()
+    input_type.add_argument('--preprocessed', action='store_true', help='输入为已处理的 640×320 双摄特征拼图')
+    input_type.add_argument('--raw', action='store_true', help='强制使用原始彩色双摄图，覆盖保存的输入类型')
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     window = Window()
@@ -670,6 +672,10 @@ def main():
             window.log('已忽略不可读取的界面设置。')
     if args.preprocessed:
         window.input_mode.setCurrentIndex(1)
+    elif args.raw:
+        window.input_mode.setCurrentIndex(0)
+    if args.preprocessed or args.raw:
+        window.layout_mode = '双视图拼接（中线拆分）'
     window.showFullScreen() if args.fullscreen else window.show()
     if args.file:
         window.load_file(args.file)

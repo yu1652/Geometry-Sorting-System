@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=YLERS 分拣操作台
+Comment=Open the sorter console after graphical login
+Exec=/bin/bash /home/nvidia/ylers-bench-5742bac/jetson-app/run_jetson.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
