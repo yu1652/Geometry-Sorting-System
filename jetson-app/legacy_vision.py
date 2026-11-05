@@ -34,9 +34,16 @@ def _center_square_320(frame_bgr: np.ndarray, name: str) -> np.ndarray:
 
 
 def prepare_legacy_pair(
-    left_bgr: np.ndarray, right_bgr: np.ndarray
+    left_bgr: np.ndarray, right_bgr: np.ndarray, *, preprocessed=False
 ) -> Tuple[np.ndarray, np.ndarray, LetterboxTransform]:
     """Return the color stitch, legacy detector tensor, and box transform."""
+    if preprocessed:
+        for frame in (left_bgr, right_bgr):
+            if not isinstance(frame, np.ndarray) or frame.dtype != np.uint8 or frame.shape != (320, 320, 3):
+                raise ValueError('已处理特征拼图必须为 640×320，左右各 320×320')
+        stitched = cv2.hconcat([left_bgr, right_bgr])
+        tensor, transform = letterbox_rgb(stitched, size=640)
+        return stitched, tensor, transform
     left_320 = _center_square_320(left_bgr, "left_bgr")
     right_320 = _center_square_320(right_bgr, "right_bgr")
     stitched = cv2.hconcat([left_320, right_320])
@@ -72,12 +79,12 @@ class LegacyRecognizer:
         if threading.current_thread() is not self._owner:
             raise RuntimeError("legacy recognizer must be used on its owner thread")
 
-    def recognize_pair(self, left_bgr: np.ndarray, right_bgr: np.ndarray) -> LegacyResult:
+    def recognize_pair(self, left_bgr: np.ndarray, right_bgr: np.ndarray, preprocessed=False) -> LegacyResult:
         self._check_thread()
         if self._closed:
             raise RuntimeError("legacy recognizer is closed")
         started = time.perf_counter()
-        stitched, tensor, transform = prepare_legacy_pair(left_bgr, right_bgr)
+        stitched, tensor, transform = prepare_legacy_pair(left_bgr, right_bgr, preprocessed=preprocessed)
         preview = stitched.copy()
 
         model = self._config.get("model", {})
@@ -114,6 +121,9 @@ class LegacyRecognizer:
             offset = side * 320
             half = stitched[:, offset:offset + 320]
             target = preview[:, offset:offset + 320]
+            if preprocessed:
+                statuses.append('feature_input' if candidates else 'no_detection')
+                continue
             if candidates:
                 detection, box = candidates[0]
                 colors.append((classify_hsv(half, full_roi, box, self._config), detection.confidence))

@@ -161,7 +161,10 @@ class ModelDialog(QDialog):
             return None
         w.pause()
         mid = w.frame.shape[1] // 2
-        return (w.frame[:, :mid].copy(), w.frame[:, mid:].copy())
+        frames = (w.frame[:, :mid].copy(), w.frame[:, mid:].copy())
+        if w.input_mode.currentIndex() == 1:
+            return (*frames, True)
+        return frames
 
     def available(self):
         return not self.closed and not self.busy and self.window.active_request_id is None and not self.window.closing
@@ -301,6 +304,10 @@ class Window(QMainWindow):
         self.mode_label = QLabel('离线回放 · 机械输出关闭')
         self.mode_label.setStyleSheet('color:#29786d;background:#deefeb;padding:5px 10px;border-radius:4px')
         top.addWidget(self.mode_label)
+        self.input_mode = QComboBox()
+        self.input_mode.addItems(['原始彩色双摄图', '已处理特征拼图'])
+        self.input_mode.setToolTip('原图自动生成灰度、增强和轮廓通道；特征拼图直接送入形状模型')
+        top.addWidget(self.input_mode)
         top.addStretch()
         top.addWidget(QLabel('设备：未连接　累计：—'))
         outer.addLayout(top)
@@ -367,7 +374,7 @@ class Window(QMainWindow):
             controls.addWidget(button)
             self.buttons[text] = button
         outer.addLayout(controls)
-        footer = QLabel('阶段1：真实媒体回放；未连接摄像头、模型和串口　｜　F5回放 / 空格暂停 / Esc停止')
+        footer = QLabel('离线识别验证　｜　F5回放 / 空格暂停 / Esc停止　｜　自动分拣待实机接入')
         footer.setObjectName('muted')
         outer.addWidget(footer)
         self.shortcuts = []
@@ -376,6 +383,12 @@ class Window(QMainWindow):
             shortcut.activated.connect(action)
             self.shortcuts.append(shortcut)
         self.log('程序已启动。离线模式不发送任何机械指令。')
+        self.input_mode.currentIndexChanged.connect(self._input_mode_changed)
+
+    def _input_mode_changed(self, index):
+        self.pause()
+        self._invalidate_frame()
+        self.log('输入类型：' + self.input_mode.currentText())
 
     def log(self, message):
         line = datetime.now().strftime('%H:%M:%S') + '　' + message
@@ -493,7 +506,8 @@ class Window(QMainWindow):
         self.status_label.setText('正在识别…')
         self.buttons['手动识别'].setEnabled(False)
         self._thread.recognize(self.active_request_id, self.frame_revision,
-                               self.frame[:, :midpoint].copy(), self.frame[:, midpoint:].copy())
+                               self.frame[:, :midpoint].copy(), self.frame[:, midpoint:].copy(),
+                               preprocessed=self.input_mode.currentIndex() == 1)
 
     def _invalidate_frame(self):
         self.frame_revision += 1
@@ -520,6 +534,8 @@ class Window(QMainWindow):
         self.result_label.setText('无目标' if detection is None else str(getattr(detection, 'shape', getattr(detection, 'class_name', '类别 %s' % detection.class_id))))
         color = result.color
         self.color_label.setText('颜色：%s　置信度：%s' % (color.name, '%.1f%%' % (color.confidence * 100)) if color else '颜色：未知　置信度：—')
+        if self.input_mode.currentIndex() == 1:
+            self.color_label.setText('颜色：特征拼图无法验证原始颜色')
         self.mask_status_label.setText('左覆膜：%s　右覆膜：%s' % tuple(result.mask_status))
         self.preview_view.show_frame(result.preview_bgr)
         self.status_label.setText('识别完成 · %.1f ms' % result.elapsed_ms)
@@ -561,6 +577,7 @@ class Window(QMainWindow):
                 raise ValueError('图像编码失败')
             self.last_saved = save_sample(ROOT/'data/samples', self.state.source, encoded.tobytes(),
                 frame_index=self.source.frame_index, layout=self.layout_mode,
+                preprocessed=self.input_mode.currentIndex() == 1,
                 width=int(self.frame.shape[1]), height=int(self.frame.shape[0]),
                 detection_ready=False, segmentation_ready=False)
             self.log('样本已保存：' + str(self.last_saved))
@@ -602,7 +619,10 @@ class Window(QMainWindow):
             self.layout_mode = combo.currentText()
             (ROOT/'data').mkdir(exist_ok=True)
             try:
-                (ROOT/'data/ui_settings.json').write_text(json.dumps({'layout':self.layout_mode}, ensure_ascii=False), encoding='utf8')
+                (ROOT/'data/ui_settings.json').write_text(json.dumps({
+                    'layout': self.layout_mode,
+                    'preprocessed': self.input_mode.currentIndex() == 1,
+                }, ensure_ascii=False), encoding='utf8')
             except OSError as exc:
                 self.error('设置保存失败：' + str(exc))
             if self.frame is not None:
@@ -633,17 +653,23 @@ def main():
     parser = argparse.ArgumentParser(description='Xavier NX视觉操作台：离线媒体回放')
     parser.add_argument('--file', type=Path)
     parser.add_argument('--fullscreen', action='store_true')
+    parser.add_argument('--preprocessed', action='store_true', help='输入为已处理的 640×320 双摄特征拼图')
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     window = Window()
     saved = ROOT/'data/ui_settings.json'
     if saved.exists():
         try:
-            value = json.loads(saved.read_text(encoding='utf8'))['layout']
+            settings = json.loads(saved.read_text(encoding='utf8'))
+            value = settings['layout']
             if value in ('双视图拼接（中线拆分）', '单视图（显示在左侧）'):
                 window.layout_mode = value
+            if settings.get('preprocessed') is True:
+                window.input_mode.setCurrentIndex(1)
         except (ValueError, KeyError, OSError):
             window.log('已忽略不可读取的界面设置。')
+    if args.preprocessed:
+        window.input_mode.setCurrentIndex(1)
     window.showFullScreen() if args.fullscreen else window.show()
     if args.file:
         window.load_file(args.file)

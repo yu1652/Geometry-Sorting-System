@@ -13,6 +13,20 @@ CLASSES_FILE = Path(__file__).resolve().parents[1] / "models" / "legacy_classes.
 
 
 class LegacyVisionTests(unittest.TestCase):
+    def test_preprocessed_pair_preserves_features_without_running_enhancement_again(self):
+        from unittest.mock import patch
+        import cv2
+        left = np.full((320, 320, 3), (43, 87, 5), dtype=np.uint8)
+        right = np.full((320, 320, 3), (71, 112, 19), dtype=np.uint8)
+        with patch.object(cv2, 'createCLAHE', side_effect=AssertionError('double preprocessing')):
+            stitched, tensor, transform = prepare_legacy_pair(left, right, preprocessed=True)
+        np.testing.assert_array_equal(stitched, np.hstack((left, right)))
+        np.testing.assert_allclose(tensor[0, :, 200, 60] * 255, (5, 87, 43))
+        np.testing.assert_allclose(tensor[0, :, 200, 450] * 255, (19, 112, 71))
+        self.assertEqual((transform.pad_x, transform.pad_y), (0, 160))
+        with self.assertRaisesRegex(ValueError, '640'):
+            prepare_legacy_pair(left[:100], right[:100], preprocessed=True)
+
     def test_prepare_center_crops_stitches_and_letterboxes_in_model_channel_order(self):
         left = np.full((4, 8, 3), 123, dtype=np.uint8)
         left[:, 2:4] = (255, 0, 0)
@@ -151,6 +165,18 @@ class LegacyRecognizerTests(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertEqual(result.mask_status, ("no_detection", "no_detection"))
         np.testing.assert_array_equal(result.preview_bgr, np.hstack((self.left, self.right)))
+
+    def test_feature_image_detects_shape_without_inventing_color_or_using_rgb_mask(self):
+        from unittest.mock import patch
+        recognizer = self.make_recognizer(_raw(self.left_box, self.right_box), self.ring)
+        with patch('legacy_vision.classify_hsv', side_effect=AssertionError('false feature color')):
+            result = recognizer.recognize_pair(self.left, self.right, preprocessed=True)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.detection.class_id, 25)
+        self.assertIsNone(result.color)
+        self.assertEqual(result.mask_status, ('feature_input', 'feature_input'))
+        self.assertEqual(len(self.segmenter.inputs), 0)
+        np.testing.assert_allclose(self.detector.inputs[0][0, :, 200, 60] * 255, (0, 0, 100))
 
     def test_multiple_left_candidates_skip_only_the_left_overlay(self):
         extra_left = ((160, 80, 200, 160), 4, 0.6)

@@ -60,8 +60,8 @@ class VisionWorker(QThread):
     def confirm_candidate(self): self._requests.put(("confirm",))
     def cancel_candidate(self): self._requests.put(("cancel",))
     def rollback(self, slot, fixture_pair): self._requests.put(("rollback", slot, fixture_pair))
-    def recognize(self, request_id, frame_revision, left_bgr, right_bgr):
-        self._requests.put((request_id, frame_revision, left_bgr, right_bgr))
+    def recognize(self, request_id, frame_revision, left_bgr, right_bgr, preprocessed=False):
+        self._requests.put((request_id, frame_revision, left_bgr, right_bgr, preprocessed))
     def shutdown(self): self._requests.put(None)
 
     @staticmethod
@@ -145,10 +145,14 @@ class VisionWorker(QThread):
                         if kind == "confirm": self._cancel()
                         self.model_failed.emit(str(exc) or type(exc).__name__)
                     continue
-                request_id, revision, left, right = request
+                request_id, revision, left, right, preprocessed = request
                 try:
                     if recognizer is None: recognizer = self.factory()
-                    self.completed.emit(request_id, revision, recognizer.recognize_pair(left, right))
+                    if preprocessed:
+                        result = recognizer.recognize_pair(left, right, preprocessed=True)
+                    else:
+                        result = recognizer.recognize_pair(left, right)
+                    self.completed.emit(request_id, revision, result)
                 except Exception as exc:
                     self.failed.emit(request_id, revision, str(exc) or type(exc).__name__)
         finally:
