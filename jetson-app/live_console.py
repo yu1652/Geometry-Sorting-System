@@ -14,9 +14,9 @@ from app import (QApplication, ImageView, QDialog, QHBoxLayout, QLabel,
                  QMessageBox, QComboBox, QFormLayout, QDialogButtonBox,
                  QBUTTON_OK, QBUTTON_CANCEL, QDIALOG_ACCEPTED, STYLE, panel)
 try:
-    from PySide6.QtWidgets import QCheckBox, QHeaderView, QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit
+    from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QHeaderView, QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit
 except ImportError:
-    from PyQt5.QtWidgets import QCheckBox, QHeaderView, QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit
+    from PyQt5.QtWidgets import QAbstractItemView, QCheckBox, QHeaderView, QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit
 
 import cv2
 import numpy as np
@@ -29,6 +29,7 @@ from live_vision import LiveVisionWorker
 from legacy_vision import surface_summary
 from calibration_frame import normalize_frame_settings
 from motion_limits import X_MAX_MM, Y_MAX_MM, position_in_machine
+from auto_bins import AutoBinSession, CapacityFull
 from sorter_console import (CalibrationDialog, DEFAULT_POINTS, TRAY_ROI,
                             button, fit_calibration)
 
@@ -77,7 +78,7 @@ class LiveWindow(QMainWindow):
         super().__init__()
         self.data_dir = Path(data_dir) if data_dir else ROOT / 'data'
         self.calibration_path = self.data_dir / 'live_calibration.json'
-        self.bindings_path = self.data_dir / 'live_bindings.json'
+        self.auto_bins_path = self.data_dir / 'live_auto_bins.json'
         self.device_path = self.data_dir / 'live_devices.json'
         self.calibration_frame = normalize_frame_settings()
         self.names = (ROOT / 'models/legacy_classes.txt').read_text(encoding='utf8').splitlines()
@@ -99,7 +100,8 @@ class LiveWindow(QMainWindow):
         self._model_process = None
         self._frames_at = None
         self.frames = {role: np.zeros((480, 640, 3), np.uint8) for role in ROLES}
-        self.bindings = {}
+        self.auto_bins = None
+        self._binding_error = None
         self.calibration_valid = False
         self.calibration_rows = list(DEFAULT_POINTS)
         self.setWindowTitle('YLERS · Xavier NX 实机分拣操作台')
@@ -107,6 +109,7 @@ class LiveWindow(QMainWindow):
         self.resize(1024, 680)
         self._make_ui()
         self._load_settings()
+        self._load_auto_bins()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_serial)
         self.timer.start(40)
@@ -143,7 +146,8 @@ class LiveWindow(QMainWindow):
         self.actions = {}
         for label, callback in (
             ('手动零点确认', self.confirm_origin), ('九点标定 / 升降', self.show_calibration),
-            ('箱号绑定', self.binding_dialog), ('运行', self.start), ('停止', self.stop),
+            ('本轮箱号', self.binding_dialog), ('清空本轮', self.clear_round),
+            ('运行', self.start), ('停止', self.stop),
             ('复位', self.reset), ('调试页', self.show_debug), ('比赛页', self.show_competition),
             ('退出', self.close),
         ):
@@ -182,11 +186,11 @@ class LiveWindow(QMainWindow):
 
     def _make_competition_page(self):
         layout = QVBoxLayout(self.competition_page)
-        self.total_label = QLabel('本次成功总数 0')
+        self.total_label = QLabel('本轮成功总数 0')
         self.total_label.setStyleSheet('font-size:24px;font-weight:bold;color:#147d73')
         layout.addWidget(self.total_label)
         self.records = QTableWidget(0, 4)
-        self.records.setHorizontalHeaderLabels(('序号', '货物名称', '图片', '本次成功总数'))
+        self.records.setHorizontalHeaderLabels(('序号', '货物名称', '图片', '本轮成功总数'))
         header = self.records.horizontalHeader()
         stretch = getattr(QHeaderView, 'Stretch', None)
         if stretch is None:
@@ -200,6 +204,7 @@ class LiveWindow(QMainWindow):
         self.bin_labels = []
         for number in range(1, 7):
             label = QLabel('%s号盒 · 0' % number)
+            label.setWordWrap(True)
             self.bin_labels.append(label)
             boxes.addWidget(label)
         layout.addLayout(boxes)
@@ -215,9 +220,9 @@ class LiveWindow(QMainWindow):
         self.machine_status.setText('状态 %s · XY %.1f, %.1f mm · 升降 %s · %s' % (
             state.state, state.x_mm, state.y_mm, '下降' if state.pusher_down else '抬起',
             '动作等待确认' if self.machine.pending else ''))
-        self.banner.setText('实机模式 · %s · %s' % (
+        self.banner.setText('实机模式 · %s · %s · 自动分箱 %s/6' % (
             '零点已确认' if state.origin_confirmed else '待手动对零确认',
-            '通信已验收' if self.machine.ready else '通信未就绪'))
+            '通信已验收' if self.machine.ready else '通信未就绪', len(self.bindings)))
 
     def refresh_ports(self):
         current = self.port_picker.currentText() or '/dev/ttyUSB0'
@@ -456,8 +461,8 @@ class LiveWindow(QMainWindow):
         if not self.calibration_valid or not self.calibration_confirmed.isChecked():
             self.write_log('请先导入或保存九点标定，并逐点实测后勾选确认。')
             return False
-        if not self.bindings:
-            self.write_log('请先配置箱号与形状、颜色的绑定。')
+        if not self._round_available():
+            self.write_log(self._binding_error or '上一件投箱尚未确认，请核查六箱后清空本轮再开始。')
             return False
         if self._models_open() or self._disconnect_deadline is not None:
             self.write_log('模型管理或断开流程进行中。')
@@ -468,7 +473,7 @@ class LiveWindow(QMainWindow):
         return (self.machine.ready and self.vision is not None and self._frames_at is not None
                 and time.monotonic() - self._frames_at <= 10
                 and self.calibration_valid and self.calibration_confirmed.isChecked()
-                and bool(self.bindings) and not self._models_open()
+                and self._round_available(in_flight=True) and not self._models_open()
                 and self._disconnect_deadline is None)
 
     def stop(self):
@@ -566,13 +571,28 @@ class LiveWindow(QMainWindow):
                 self.stop()
                 return
             usable = (detection is not None and color is not None and color.valid_pixels > 0
-                      and color.confidence >= 0.35)
-            bin_id = self.bindings.get((shape, color_name)) if usable else None
-            if bin_id is None:
-                self.write_log('识别不确定或没有对应箱号，流程已停止。')
+                      and np.isfinite(color.confidence) and color.confidence >= 0.35
+                      and shape in self.names and color_name in COLORS)
+            if not usable:
+                self.write_log('形状或颜色识别不确定，未分配箱号，流程已停止。')
                 self.stop()
-            elif self.machine.provide_sort(bin_id):
+                return
+            try:
+                # Persist the reservation before sending SORT. A missing DONE
+                # must not let a different category reuse the same physical box.
+                bin_id = self.auto_bins.reserve(shape, color_name)
+            except CapacityFull:
+                self.stop()
+                self.write_log('检测到第七种新类别：六箱已绑定，已停机，本件未发送投箱指令。')
+                return
+            except (OSError, ValueError) as error:
+                self.stop()
+                self.write_log('自动分箱未执行：' + str(error))
+                return
+            self._refresh_binding_display()
+            if self.machine.provide_sort(bin_id):
                 self._last_sort = (shape, color_name, bin_id, result)
+                self.write_log('%s %s → %s号箱，等待投箱完成。' % (color_name, shape, bin_id))
             else:
                 self.stop()
 
@@ -600,14 +620,19 @@ class LiveWindow(QMainWindow):
             self.stop()
 
     def record_completion(self):
-        state = self.machine.snapshot()
         if self._last_sort is None:
             self.write_log('DONE 缺少对应识别记录，已停止。')
             self.stop()
             return
         shape, color, bin_id, result = self._last_sort
+        try:
+            self.auto_bins.complete(bin_id)
+        except (OSError, ValueError) as error:
+            self.stop()
+            self.write_log('已收到 DONE，但本轮记录未确认保存：' + str(error))
+            return
         self._last_sort = None
-        total = state.completed_count
+        total = self.auto_bins.total
         row = self.records.rowCount()
         self.records.insertRow(row)
         for column, value in ((0, total), (1, '%s %s → %s号盒' % (color, shape, bin_id)), (3, total)):
@@ -620,13 +645,11 @@ class LiveWindow(QMainWindow):
         self.records.setRowHeight(row, 68)
         if self.records.rowCount() > 200:
             self.records.removeRow(0)
-        self.total_label.setText('本次成功总数 %s' % total)
-        for index, label in enumerate(self.bin_labels):
-            label.setText('%s号盒 · %s' % (index + 1, state.bin_counts[index]))
+        self._refresh_binding_display()
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             record = {'time': datetime.now().isoformat(), 'shape': shape, 'color': color,
-                      'bin': bin_id, 'session_total': total}
+                      'bin': bin_id, 'session_total': total, 'round_id': self.auto_bins.round_id}
             with (self.data_dir / 'live_results.jsonl').open('a', encoding='utf8') as stream:
                 stream.write(json.dumps(record, ensure_ascii=False) + '\n')
                 stream.flush()
@@ -635,54 +658,121 @@ class LiveWindow(QMainWindow):
             self.stop()
             self.write_log('结果保存失败：' + str(error))
 
-    def save_bindings(self, rows):
-        bindings = {}
-        bins = set()
-        for row in rows:
-            shape, color, number = row['shape'], row['color'], row['bin']
-            if (shape not in self.names or color not in COLORS or type(number) is not int
-                    or not 1 <= number <= 6 or number in bins or (shape, color) in bindings):
-                raise ValueError('箱号绑定包含未知类别、颜色、重复项或非法箱号')
-            bins.add(number)
-            bindings[(shape, color)] = number
-        atomic_json(self.bindings_path, rows)
-        self.bindings = bindings
+    @property
+    def bindings(self):
+        return self.auto_bins.bindings if self.auto_bins is not None else {}
+
+    def _load_auto_bins(self):
+        try:
+            self.auto_bins = AutoBinSession(self.auto_bins_path, self.names, COLORS)
+        except (OSError, ValueError) as error:
+            self._binding_error = '本轮箱号记录无法读取，已禁止自动运行：' + str(error)
+            self.write_log(self._binding_error)
+        self._refresh_binding_display()
+        if self.auto_bins is not None and self.auto_bins.pending is not None:
+            self.write_log('存在未收到 DONE 确认的投箱，请检查六箱；清空本轮后才能重新运行。')
+
+    def _round_available(self, in_flight=False):
+        if self.auto_bins is None or self._binding_error is not None:
+            return False
+        pending = self.auto_bins.pending
+        if pending is None:
+            return True
+        return bool(in_flight and self._last_sort is not None
+                    and self.machine.snapshot().state == 'wait_done'
+                    and (pending['shape'], pending['color'], pending['bin']) == self._last_sort[:3])
+
+    def _refresh_binding_display(self):
+        if self.auto_bins is None:
+            self.total_label.setText('本轮记录待检查')
+            for number, label in enumerate(self.bin_labels, 1):
+                label.setText('%s号箱 · 待检查' % number)
+                label.setToolTip(self._binding_error or '尚未读取本轮记录')
+            return
+        entries = {row['bin']: row for row in self.auto_bins.entries} if self.auto_bins else {}
+        pending = self.auto_bins.pending if self.auto_bins else None
+        total = self.auto_bins.total if self.auto_bins else 0
+        self.total_label.setText('本轮成功总数 %s' % total)
+        for number, label in enumerate(self.bin_labels, 1):
+            row = entries.get(number)
+            label.setText('%s号箱 · %s件' % (number, row['count'] if row else 0))
+            label.setToolTip('%s %s' % (row['color'], row['shape']) if row else '按首次出现顺序自动绑定')
+            if row:
+                label.setText(label.text() + '\n%s %s' % (row['color'], row['shape']))
+            if pending is not None and pending['bin'] == number:
+                label.setText(label.text() + ' · 待确认')
+
+    def clear_round(self):
+        if (self.machine.snapshot().state in AUTO_STATES or self.machine.pending or self._job is not None
+                or self._closing or self._models_open() or self._disconnect_deadline is not None):
+            self.write_log('请先停机并等待当前动作结束，再清空本轮。')
+            return False
+        if (self.machine.connected or self.serial_port is not None) and not self.machine.idle_confirmed:
+            self.write_log('尚未收到设备空闲或停机确认，暂不能清空本轮。')
+            return False
+        message = '请确认六个箱子里的物块都已取出。'
+        if not self.machine.connected and self.serial_port is None:
+            message = ('当前未连接设备，无法确认机构已经停止。\n'
+                       '请先断开电机和舵机驱动供电，确认机构停止，并清空六个箱子后再确认。')
+        message += '\n清空本轮会重置自动箱号和本轮计数，下一种有效类别从1号箱开始。'
+        answer = QMessageBox.question(self, '开始新一轮', message)
+        yes = getattr(QMessageBox, 'Yes', None)
+        if yes is None:
+            yes = QMessageBox.StandardButton.Yes
+        if answer != yes:
+            return False
+        try:
+            session = self.auto_bins or AutoBinSession(self.auto_bins_path, self.names, COLORS, load_existing=False)
+            session.clear()
+        except (OSError, ValueError) as error:
+            self.write_log('清空本轮失败：' + str(error))
+            return False
+        self.auto_bins = session
+        self._binding_error = None
+        self._last_sort = None
+        self.records.setRowCount(0)
+        self._refresh_binding_display()
+        self.write_log('已开始新一轮，按形状＋颜色首次出现顺序自动分配1至6号箱。')
+        return True
 
     def binding_dialog(self):
-        if self.machine.snapshot().state in AUTO_STATES:
-            self.write_log('请先停机再修改箱号。')
-            return
+        dialog = self.create_binding_dialog()
+        dialog.exec()
+        dialog.deleteLater()
+
+    def create_binding_dialog(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle('六箱绑定')
+        dialog.setWindowTitle('本轮自动箱号')
+        dialog.resize(620, 330)
         layout = QVBoxLayout(dialog)
-        table = QTableWidget(6, 3)
-        table.setHorizontalHeaderLabels(('箱号', '形状类别', '颜色'))
-        choices = []
-        for index in range(6):
-            table.setItem(index, 0, QTableWidgetItem(str(index + 1)))
-            shape, color = QComboBox(), QComboBox()
-            shape.addItems(['未绑定'] + self.names)
-            color.addItems(COLORS)
-            for (name, color_name), number in self.bindings.items():
-                if number == index + 1:
-                    shape.setCurrentText(name)
-                    color.setCurrentText(color_name)
-            table.setCellWidget(index, 1, shape)
-            table.setCellWidget(index, 2, color)
-            choices.append((shape, color))
+        hint = QLabel('形状＋颜色相同为同类；新类别按首次出现顺序绑定1至6号箱，第七类停机。')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        table = QTableWidget(6, 4)
+        table.setObjectName('auto_bin_table')
+        table.setHorizontalHeaderLabels(('箱号', '形状类别', '颜色', '已完成数量'))
+        no_edit = getattr(QAbstractItemView, 'NoEditTriggers', None)
+        if no_edit is None:
+            no_edit = QAbstractItemView.EditTrigger.NoEditTriggers
+        table.setEditTriggers(no_edit)
+        entries = {row['bin']: row for row in self.auto_bins.entries} if self.auto_bins else {}
+        for number in range(1, 7):
+            row = entries.get(number)
+            for column, value in enumerate((number, row['shape'] if row else '未绑定',
+                                             row['color'] if row else '—', row['count'] if row else 0)):
+                table.setItem(number - 1, column, QTableWidgetItem(str(value)))
+        table.setColumnWidth(0, 60)
+        table.setColumnWidth(2, 80)
+        table.setColumnWidth(3, 100)
+        stretch = getattr(QHeaderView, 'Stretch', None)
+        if stretch is None:
+            stretch = QHeaderView.ResizeMode.Stretch
+        table.horizontalHeader().setSectionResizeMode(1, stretch)
         layout.addWidget(table)
-        buttons = QDialogButtonBox(QBUTTON_OK | QBUTTON_CANCEL)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        if dialog.exec() == QDIALOG_ACCEPTED:
-            rows = [{'shape': shape.currentText(), 'color': color.currentText(), 'bin': index + 1}
-                    for index, (shape, color) in enumerate(choices) if shape.currentIndex() > 0]
-            try:
-                self.save_bindings(rows)
-                self.write_log('已保存箱号绑定。')
-            except (OSError, ValueError) as error:
-                self.write_log(str(error))
+        if self.auto_bins is not None and self.auto_bins.pending is not None:
+            layout.addWidget(QLabel('存在待确认投箱；计数仅在收到真实 DONE 后增加。'))
+        layout.addWidget(button('关闭', dialog.accept))
+        return dialog
 
     def create_calibration_dialog(self):
         return CalibrationDialog(self, self.calibration_rows)
@@ -720,8 +810,6 @@ class LiveWindow(QMainWindow):
                 self.calibration_frame = normalize_frame_settings(saved.get('frame'))
                 self.calibration_rows = rows
                 self.calibration_valid = True
-            if self.bindings_path.exists():
-                self.save_bindings(json.loads(self.bindings_path.read_text(encoding='utf8')))
         except (KeyError, TypeError, ValueError, OSError) as error:
             self.write_log('配置未加载：' + str(error))
 

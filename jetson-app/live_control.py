@@ -53,6 +53,13 @@ class LiveController:
         return self._pending
 
     @property
+    def idle_confirmed(self):
+        """A real MCU idle/stop report, with no manual or automatic action pending."""
+        return (self.ready and self._mcu_state in ('WAIT_START', 'STOP')
+                and self._state in ('needs_origin', 'stopped', 'armed')
+                and self._pending is None and not self._pusher_down)
+
+    @property
     def request_epoch(self):
         return self.epoch
 

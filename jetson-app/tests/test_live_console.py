@@ -203,16 +203,14 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertIn('右覆膜：空掩膜', self.window.result_label.text())
         self.assertEqual(self.window.records.rowCount(), 0)
 
-    def test_binding_validation_rejects_duplicate_and_unknown_class_before_write(self):
-        window = self.window
-        rows = [{'shape': 'yuan_zhu', 'color': '蓝色', 'bin': 1}]
-        window.save_bindings(rows)
-        before = window.bindings_path.read_bytes()
-        with self.assertRaises(ValueError):
-            window.save_bindings(rows + [dict(rows[0], bin=2)])
-        self.assertEqual(window.bindings_path.read_bytes(), before)
-        with self.assertRaises(ValueError):
-            window.save_bindings([dict(rows[0], shape='wrong_class')])
+    def test_legacy_manual_bindings_do_not_define_the_automatic_round(self):
+        from live_console import LiveWindow
+        path = self.window.data_dir / 'live_bindings.json'
+        path.write_text(json.dumps([{'shape':'yuan_zhu','color':'蓝色','bin':6}]), encoding='utf8')
+        restored = LiveWindow(data_dir=self.window.data_dir)
+        self.addCleanup(restored.close)
+        self.assertEqual(restored.bindings, {})
+        self.assertTrue(path.exists())
 
     def ready_manual_controller(self):
         from live_control import LiveController
@@ -366,7 +364,6 @@ class LiveConsoleTests(unittest.TestCase):
         window._frames_at = time.monotonic()
         window.save_calibration(window.calibration_rows)
         window.calibration_confirmed.setChecked(True)
-        window.save_bindings([{'shape': 'yuan_zhu', 'color': '蓝色', 'bin': 1}])
         self.assertTrue(window.start())
         window.machine.handle_mcu('STATUS,HOST_READY')
         window.machine.handle_mcu('STATUS,START')
@@ -388,7 +385,7 @@ class LiveConsoleTests(unittest.TestCase):
         port.data = b'DONE\nDONE\n'
         window.poll_serial()
         self.assertEqual(window.records.rowCount(), 1)
-        self.assertEqual(window.total_label.text(), '本次成功总数 1')
+        self.assertEqual(window.total_label.text(), '本轮成功总数 1')
         self.assertTrue((window.data_dir / 'live_results.jsonl').is_file())
 
 
