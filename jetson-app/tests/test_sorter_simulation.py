@@ -51,13 +51,13 @@ class SorterSimulationTests(unittest.TestCase):
         self.assertTrue(self.sorter.set_pusher(False))
         self.assertEqual((self.sorter.snapshot().x_mm, self.sorter.snapshot().y_mm), (20, 30))
 
-    def test_outside_sample_envelope_and_nonfinite_motion_are_rejected(self):
+    def test_outside_machine_envelope_and_nonfinite_motion_are_rejected(self):
         self.assertTrue(self.sorter.confirm_origin())
-        for x, y in [(float("nan"), 30), (20, float("inf")), (-1, 20), (161, 20), (True, 20)]:
+        for x, y in [(float("nan"), 30), (20, float("inf")), (-1, 20), (260.001, 20), (20, 230.001), (True, 20)]:
             with self.subTest(x=x, y=y):
                 self.assertFalse(self.sorter.goto(x, y))
         self.assertTrue(self.sorter.start())
-        for x in [10, 10.01, 161, float("nan")]:
+        for x in [10, 10.01, 260.001, float("nan")]:
             self.assertFalse(self.sorter.run_cycle(x, 20, 1))
         self.assertEqual(self.sorter.snapshot().state, "running")
         self.assertEqual(self.sorter.snapshot().completed_count, 0)
@@ -100,3 +100,27 @@ class SorterSimulationTests(unittest.TestCase):
         self.assertFalse(self.sorter.run_cycle(10.01, 20, 1))
         self.assertIn("HOST PUSH,NG", self.sorter.snapshot().log)
         self.assertEqual(self.sorter.snapshot().state, "running")
+
+    def test_manual_machine_corner_and_zero_are_inclusive(self):
+        self.assertTrue(self.sorter.confirm_origin())
+        for x, y in ((260, 230), (161, 161), (0, 0)):
+            self.assertTrue(self.sorter.goto(x, y))
+            self.assertEqual((self.sorter.snapshot().x_mm, self.sorter.snapshot().y_mm), (x, y))
+
+    def test_auto_machine_corner_completes_and_keeps_firmware_park(self):
+        self.start_sorter()
+        self.assertTrue(self.sorter.run_cycle(260, 230, 1))
+        snapshot = self.sorter.snapshot()
+        self.assertIn('HOST PUSH,260.0,230.0,mm', snapshot.log)
+        self.assertEqual((snapshot.x_mm, snapshot.y_mm), (49, 5))
+        self.assertEqual(snapshot.completed_count, 1)
+
+    def test_auto_beyond_either_axis_never_sends_coordinate_push(self):
+        self.start_sorter()
+        for x, y in ((260.001, 230), (260, 230.001)):
+            with self.subTest(x=x, y=y):
+                self.assertFalse(self.sorter.run_cycle(x, y, 1))
+                self.assertEqual(self.sorter.snapshot().state, 'running')
+        log = self.sorter.snapshot().log
+        self.assertFalse(any(line.startswith('HOST PUSH,') and line.endswith(',mm') for line in log))
+        self.assertEqual(self.sorter.snapshot().completed_count, 0)

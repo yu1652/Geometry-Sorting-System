@@ -27,6 +27,8 @@ from esp32_serial import SerialLineTransport, SerialTransportError
 from live_control import LiveController
 from live_vision import LiveVisionWorker
 from legacy_vision import surface_summary
+from calibration_frame import normalize_frame_settings
+from motion_limits import X_MAX_MM, Y_MAX_MM, position_in_machine
 from sorter_console import (CalibrationDialog, DEFAULT_POINTS, TRAY_ROI,
                             button, fit_calibration)
 
@@ -63,8 +65,8 @@ def validate_points(rows):
             or {row[0] for row in rows} != {'P%s' % n for n in range(1, 10)}):
         raise ValueError('需要 P1 至 P9 各一个完整标定点')
     for _, px, py, x, y in rows:
-        if not (0 <= px < 640 and 0 <= py < 480 and 0 <= x <= 160 and 0 <= y <= 160):
-            raise ValueError('标定点超出画幅或当前 160mm 行程范围')
+        if not (0 <= px < 640 and 0 <= py < 480 and position_in_machine(x, y)):
+            raise ValueError(f'标定点超出画幅或机械行程：X 0–{X_MAX_MM:g}、Y 0–{Y_MAX_MM:g} mm')
     return fit_calibration(rows)
 
 
@@ -77,6 +79,7 @@ class LiveWindow(QMainWindow):
         self.calibration_path = self.data_dir / 'live_calibration.json'
         self.bindings_path = self.data_dir / 'live_bindings.json'
         self.device_path = self.data_dir / 'live_devices.json'
+        self.calibration_frame = normalize_frame_settings()
         self.names = (ROOT / 'models/legacy_classes.txt').read_text(encoding='utf8').splitlines()
         self.sources = dict(DEFAULT_SOURCES)
         self._vision_factory, self._serial_factory = vision_factory, serial_factory
@@ -692,10 +695,12 @@ class LiveWindow(QMainWindow):
         dialog.exec()
         dialog.deleteLater()
 
-    def save_calibration(self, rows):
+    def save_calibration(self, rows, frame=None):
         validate_points(rows)
-        atomic_json(self.calibration_path, {'mode': 'live', 'points': rows})
+        frame = normalize_frame_settings(self.calibration_frame if frame is None else frame)
+        atomic_json(self.calibration_path, {'mode': 'live', 'points': rows, 'frame': frame})
         self.calibration_rows = rows
+        self.calibration_frame = frame
         self.calibration_valid = True
         self.calibration_confirmed.setChecked(False)
 
@@ -712,6 +717,7 @@ class LiveWindow(QMainWindow):
                 if saved['mode'] != 'live' or len(rows) != 9 or {r[0] for r in rows} != {'P%s' % n for n in range(1, 10)}:
                     raise ValueError('实机九点标定格式不正确')
                 validate_points(rows)
+                self.calibration_frame = normalize_frame_settings(saved.get('frame'))
                 self.calibration_rows = rows
                 self.calibration_valid = True
             if self.bindings_path.exists():

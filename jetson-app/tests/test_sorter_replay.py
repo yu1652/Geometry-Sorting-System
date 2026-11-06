@@ -65,3 +65,17 @@ class RecordedSorterTests(unittest.TestCase):
         self.assertEqual(state.state, "running")
         self.assertIn("HOST PUSH,WAIT", state.log)
         self.assertNotIn("MCU SCAN", state.log)
+
+    def test_replay_loads_offset_calibration_using_machine_travel(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from sorter_replay import _calibration
+        rows = [('P%d' % (j * 3 + i + 1), 211 + i * 133, 92 + j * 133,
+                 70 + i * 56, 12 + j * 56) for j in range(3) for i in range(3)]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'calibration.json'
+            path.write_text(json.dumps({'mode': 'simulation', 'points': rows}), encoding='utf8')
+            mapping = _calibration(path)
+            self.assertAlmostEqual(mapping.map_pixel(477, 92)[0], 182)
+            mapping.validate_physical(260, 230)

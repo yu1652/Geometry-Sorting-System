@@ -25,6 +25,20 @@ def frame_grid(box, inset_percent=15):
     return [(x + width * fx, y + height * fy) for fy in fractions for fx in fractions]
 
 
+def normalize_frame_settings(value=None):
+    if value is None:
+        value = {'box': [154, 35, 379, 380], 'inset_percent': 15}
+    if not isinstance(value, dict):
+        raise ValueError('标定框配置格式不正确')
+    try:
+        box = validate_frame(value['box'])
+        inset = float(value['inset_percent'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('标定框配置缺失或无效') from exc
+    frame_grid(box, inset)
+    return {'box': list(box), 'inset_percent': inset}
+
+
 class CalibrationFrameView(ImageView):
     """Drag inside to move, corners to resize, outside to draw a new frame."""
     def __init__(self, box, changed):

@@ -1,14 +1,15 @@
 """Deterministic, in-process model of the sorter protocol for the console."""
 
-import math
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 
-# Example bounds from the reference host configuration, for simulation only.
-MAX_X_MM = 160.0
-MAX_Y_MM = 160.0
+from motion_limits import X_MAX_MM, Y_MAX_MM, position_in_machine
+
+
+MAX_X_MM = X_MAX_MM
+MAX_Y_MM = Y_MAX_MM
 PUSH_END_X_MM = 10.0
 PARK_MM = (49.0, 5.0)
 
@@ -27,14 +28,7 @@ class SorterSnapshot:
 
 
 def _in_envelope(x, y):
-    return (
-        type(x) in (int, float)
-        and type(y) in (int, float)
-        and 0 <= x <= MAX_X_MM
-        and 0 <= y <= MAX_Y_MM
-        and math.isfinite(x)
-        and math.isfinite(y)
-    )
+    return position_in_machine(x, y)
 
 
 class SimulatedSorter:

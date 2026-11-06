@@ -80,6 +80,38 @@ class LiveControllerTests(unittest.TestCase):
         self.assertFalse(self.control.pending)
         self.assertEqual((self.control.snapshot().x_mm, self.control.snapshot().y_mm), (20, 30))
 
+    def test_machine_corner_goto_waits_for_exact_real_pulses(self):
+        self.arm()
+        self.assertTrue(self.control.goto(260, 230))
+        self.assertEqual(self.sent[-2:], ['GOTO_MM,260.000,230.000', 'STATUS?'])
+        for line in ('RX,GOTO_MM,260.000,230.000', 'STATUS,PUSHER_UP',
+                     'STATUS,MCU,WAIT_START,10400,8969,123',
+                     'STATUS,MCU,WAIT_START,10399,8970,123',
+                     'STATUS,MCU,IDLE,10400,8970,123'):
+            self.control.handle_mcu(line)
+            self.assertEqual(self.control.pending, 'goto')
+        self.control.handle_mcu('STATUS,MCU,WAIT_START,10400,8970,123')
+        self.assertIsNone(self.control.pending)
+        self.assertEqual((self.control.snapshot().x_mm, self.control.snapshot().y_mm), (260, 230))
+
+    def test_push_accepts_machine_corner_above_tray_size(self):
+        self.start_running()
+        self.control.handle_mcu('PUSH?')
+        self.assertTrue(self.control.provide_target(260, 230))
+        self.assertEqual(self.sent[-1], 'PUSH,260.000,230.000,mm')
+        self.assertEqual(self.control.snapshot().state, 'wait_scan')
+
+    def test_push_beyond_either_machine_axis_stops_without_push(self):
+        for x, y in ((260.001, 230), (260, 230.001)):
+            with self.subTest(x=x, y=y):
+                self.setUp()
+                self.start_running()
+                self.control.handle_mcu('PUSH?')
+                before = len(self.sent)
+                self.assertFalse(self.control.provide_target(x, y))
+                self.assertEqual(self.sent[before:], ['STOP', 'STATUS?'])
+                self.assertFalse(self.control.snapshot().origin_confirmed)
+
     def test_lift_waits_for_real_ack_and_up_can_cancel_pending_down(self):
         self.arm()
         self.assertTrue(self.control.set_pusher(True))
@@ -169,7 +201,7 @@ class LiveControllerTests(unittest.TestCase):
 
     def test_bad_coordinates_and_bins_do_not_send_motion(self):
         self.arm()
-        for x, y in ((-1, 0), (161, 0), (float('nan'), 1), (1, float('inf')), (True, 1)):
+        for x, y in ((-1, 0), (260.001, 0), (0, 230.001), (0, -1), (float('nan'), 1), (1, float('inf')), (True, 1)):
             before = list(self.sent)
             self.assertFalse(self.control.goto(x, y))
             self.assertEqual(self.sent, before)

@@ -10,6 +10,7 @@ import yaml
 from camera_service import CameraService
 from legacy_vision import LegacyRecognizer
 from sorter_simulation import SimulatedSorter
+from motion_limits import MACHINE_REGION, position_in_machine
 from tray_locator import TrayDetector, TrayLocator
 from vision import load_class_names
 from xy_calibration import CalibrationPoint, XYCalibration
@@ -89,10 +90,12 @@ def _calibration(path):
     rows = data["points"]
     if len(rows) != 9 or {row[0] for row in rows} != {"P{}".format(i) for i in range(1, 10)}:
         raise ValueError("calibration requires P1–P9")
+    if any(not position_in_machine(row[3], row[4]) for row in rows):
+        raise ValueError('calibration point outside machine travel')
     return XYCalibration.fit(
         [CalibrationPoint(*row[1:]) for row in rows],
         pixel_region=(154, 35, 533, 415),
-        physical_region=(0, 0, 160, 160),
+        physical_region=MACHINE_REGION,
     )
 
 

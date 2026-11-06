@@ -106,9 +106,9 @@ class SimulationConsoleTests(unittest.TestCase):
         self.app.sendEvent(editor, event)
         self.assertEqual(dialog.points.currentRow(), 4)
         self.assertAlmostEqual(calibration_rows(dialog.points)[4][3], 80.1)
-        editor.setValue(160)
+        editor.setValue(260)
         editor.stepUp()
-        self.assertEqual(editor.value(), 160)
+        self.assertEqual(editor.value(), 260)
         editor.setValue(0)
         editor.stepDown()
         self.assertEqual(editor.value(), 0)
@@ -124,6 +124,18 @@ class SimulationConsoleTests(unittest.TestCase):
         self.assertEqual(self.window.machine.snapshot().x_mm, 0)
         dialog.goto_selected()
         self.assertAlmostEqual(self.window.machine.snapshot().x_mm, 32.7)
+
+    def test_import_accepts_machine_offset_beyond_tray_size(self):
+        import yaml
+        from sorter_console import DEFAULT_POINTS, legacy_rows
+        points = [
+            {'id': name, 'pixel': [px, py], 'machine': [x + 46, y + 40]}
+            for name, px, py, x, y in DEFAULT_POINTS]
+        source = self.calibration_path.with_suffix('.yaml')
+        source.write_text(yaml.safe_dump({'version': 2, 'unit': 'mm', 'points': points}), encoding='utf8')
+        rows = legacy_rows(source)
+        self.assertEqual(rows[2][3], 182)
+        self.assertEqual(rows[8][4], 176)
 
     def test_legacy_import_is_draft_until_saved(self):
         import yaml
@@ -180,6 +192,51 @@ class SimulationConsoleTests(unittest.TestCase):
                            ((0, 0, float('nan'), 100), 15)]:
             with self.subTest(box=box, inset=inset), self.assertRaises(ValueError):
                 frame_grid(box, inset)
+
+    def test_saved_frame_and_inset_restore_without_regenerating_adjusted_points(self):
+        from sorter_console import calibration_rows
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(self.dispose, dialog)
+        dialog.set_frame((150.43, 47.86, 377.44, 374.7))
+        dialog.frame_inset.setValue(20)
+        dialog.generate_points()
+        dialog.points.item(0, 1).setText('227.123456')
+        expected_points = calibration_rows(dialog.points)
+        dialog.save_points()
+        dialog.reject()
+        reopened = self.window.create_calibration_dialog()
+        self.addCleanup(self.dispose, reopened)
+        self.assertEqual(reopened.view.box, (150.43, 47.86, 377.44, 374.7))
+        self.assertEqual(reopened.frame_inset.value(), 20)
+        self.assertEqual(calibration_rows(reopened.points), expected_points)
+        restored = type(self.window)(calibration_path=self.calibration_path)
+        self.addCleanup(self.dispose, restored)
+        restarted = restored.create_calibration_dialog()
+        self.addCleanup(self.dispose, restarted)
+        self.assertEqual(restarted.view.box, reopened.view.box)
+        self.assertEqual(restarted.frame_inset.value(), 20)
+        self.assertEqual(calibration_rows(restarted.points), expected_points)
+        # Unsaved edits do not overwrite the last saved settings.
+        restarted.set_frame((160, 60, 300, 300))
+        restarted.frame_inset.setValue(10)
+        restarted.reject()
+        discarded = restored.create_calibration_dialog()
+        self.addCleanup(self.dispose, discarded)
+        self.assertEqual(discarded.view.box, reopened.view.box)
+        self.assertEqual(discarded.frame_inset.value(), 20)
+
+    def test_old_point_file_without_frame_keeps_coordinates_and_uses_default_box(self):
+        import json
+        from sorter_console import DEFAULT_POINTS, TRAY_ROI
+        rows = [list(row) for row in DEFAULT_POINTS]
+        rows[0][1] = 212
+        self.calibration_path.write_text(json.dumps({'mode':'simulation', 'points':rows}), encoding='utf8')
+        restored = type(self.window)(calibration_path=self.calibration_path)
+        self.addCleanup(self.dispose, restored)
+        dialog = restored.create_calibration_dialog()
+        self.addCleanup(self.dispose, dialog)
+        self.assertEqual(dialog.view.box, TRAY_ROI)
+        self.assertEqual(float(dialog.points.item(0, 1).text()), 212)
 
     def test_frame_drag_maps_letterboxed_preview_and_does_not_move_machine(self):
         try:

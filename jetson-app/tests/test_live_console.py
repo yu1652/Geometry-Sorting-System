@@ -80,6 +80,97 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertNotIn('仿真', dialog.windowTitle())
         self.assertEqual(dialog.points.rowCount(), 9)
 
+    def test_machine_range_is_independent_of_tray_size_and_survives_save_reload(self):
+        from sorter_console import CoordinateSpinBox, calibration_rows
+        from live_console import LiveWindow, validate_points
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(dialog.reject)
+        x = dialog.findChild(CoordinateSpinBox, 'coordinate_2_3')
+        y = dialog.findChild(CoordinateSpinBox, 'coordinate_8_4')
+        self.assertEqual(x.maximum(), 260)
+        self.assertEqual(y.maximum(), 230)
+        for row in range(9):
+            dialog.points.item(row, 3).setText(str(70 + 56 * (row % 3)))
+            dialog.points.item(row, 4).setText(str(12 + 56 * (row // 3)))
+        rows = calibration_rows(dialog.points)
+        mapping = validate_points(rows)
+        self.assertAlmostEqual(mapping.map_pixel(477, 92)[0], 182)
+        mapping.validate_physical(260, 230)
+        for position in ((260.001, 230), (260, 230.001), (-.001, 0)):
+            with self.assertRaises(ValueError):
+                mapping.validate_physical(*position)
+        dialog.set_frame((150.43, 47.86, 377.44, 374.7))
+        dialog.frame_inset.setValue(18)
+        dialog.save_points()
+        restored = LiveWindow(data_dir=self.window.data_dir)
+        self.addCleanup(restored.close)
+        self.assertTrue(restored.calibration_valid)
+        self.assertEqual(restored.calibration_rows[2][3], 182)
+        saved = restored.create_calibration_dialog()
+        self.addCleanup(saved.reject)
+        self.assertEqual(saved.view.box, dialog.view.box)
+        self.assertEqual(saved.frame_inset.value(), 18)
+        self.assertFalse(restored.calibration_confirmed.isChecked())
+
+    def test_out_of_travel_calibration_does_not_overwrite_saved_points(self):
+        from sorter_console import DEFAULT_POINTS
+        self.window.save_calibration(list(DEFAULT_POINTS))
+        before = self.window.calibration_path.read_bytes()
+        for x, y in ((260.001, 100), (100, 230.001), (float('nan'), 20)):
+            rows = [list(row) for row in DEFAULT_POINTS]
+            rows[0][3:5] = (x, y)
+            with self.subTest(x=x, y=y), self.assertRaises(ValueError):
+                self.window.save_calibration(rows)
+            self.assertEqual(self.window.calibration_path.read_bytes(), before)
+
+    def test_selected_calibration_goto_above_160_keeps_real_ack_requirement(self):
+        from sorter_console import CoordinateSpinBox
+        sent = self.ready_manual_controller()
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(dialog.reject)
+        before = list(sent)
+        dialog.findChild(CoordinateSpinBox, 'coordinate_2_3').setValue(182)
+        dialog.findChild(CoordinateSpinBox, 'coordinate_2_4').setValue(12)
+        self.assertEqual(sent, before)
+        self.assertEqual(self.window.machine.snapshot().x_mm, 0)
+        dialog.points.setCurrentCell(2, 3)
+        dialog.goto_selected()
+        self.assertEqual(sent[-2:], ['GOTO_MM,182.000,12.000', 'STATUS?'])
+        self.assertEqual(self.window.machine.pending, 'goto')
+        self.window.machine.handle_mcu('STATUS,MCU,WAIT_START,7280,468,77')
+        self.assertFalse(self.window.machine.pending)
+        self.assertEqual(self.window.machine.snapshot().x_mm, 182)
+
+    def test_invalid_frame_cannot_overwrite_saved_calibration(self):
+        self.window.save_calibration(self.window.calibration_rows)
+        before = self.window.calibration_path.read_bytes()
+        for frame in ({'box': [600, 20, 200, 100], 'inset_percent': 15},
+                      {'box': [100, 20, 200, 100], 'inset_percent': float('nan')}):
+            with self.subTest(frame=frame), self.assertRaises(ValueError):
+                self.window.save_calibration(self.window.calibration_rows, frame=frame)
+            self.assertEqual(self.window.calibration_path.read_bytes(), before)
+
+    def test_existing_six_adjusted_points_survive_old_file_upgrade_without_confirmation(self):
+        from sorter_console import DEFAULT_POINTS, calibration_rows
+        from live_console import LiveWindow
+        rows = [list(row) for row in DEFAULT_POINTS]
+        confirmed = {0:(70,12), 1:(126,12), 3:(70,71), 4:(126,71),
+                     6:(71,127), 7:(128.5,127.5)}
+        for index, position in confirmed.items():
+            rows[index][3:5] = position
+        rows[2][3:5] = (159,12)  # Other points still awaiting physical adjustment.
+        self.window.calibration_path.write_text(json.dumps({'mode':'live','points':rows}), encoding='utf8')
+        restored = LiveWindow(data_dir=self.window.data_dir)
+        self.addCleanup(restored.close)
+        dialog = restored.create_calibration_dialog()
+        self.addCleanup(dialog.reject)
+        self.assertEqual(calibration_rows(dialog.points), [tuple(row) for row in rows])
+        self.assertFalse(restored.calibration_confirmed.isChecked())
+        dialog.set_frame((150.43,47.86,377.44,374.7))
+        dialog.save_points()
+        self.assertEqual(restored.calibration_rows, [tuple(row) for row in rows])
+        self.assertFalse(restored.calibration_confirmed.isChecked())
+
     def test_manual_result_does_not_count_and_stale_result_is_discarded(self):
         window = self.window
         result = SimpleNamespace(

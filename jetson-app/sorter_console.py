@@ -19,7 +19,8 @@ import numpy as np
 import yaml
 
 from camera_service import CameraError, CameraSource
-from calibration_frame import CalibrationFrameView, frame_grid, validate_frame
+from calibration_frame import CalibrationFrameView, frame_grid, validate_frame, normalize_frame_settings
+from motion_limits import MACHINE_REGION, X_MAX_MM, Y_MAX_MM, position_in_machine
 from media import MediaSource
 from sorter_simulation import SimulatedSorter
 from tray_locator import TrayLocator
@@ -35,10 +36,12 @@ TRAY_ROI = (154, 35, 379, 380)
 
 
 def fit_calibration(rows):
+    if any(not position_in_machine(x, y) for _, _, _, x, y in rows):
+        raise ValueError(f'机械坐标须在 X 0–{X_MAX_MM:g}、Y 0–{Y_MAX_MM:g} mm 范围内')
     return XYCalibration.fit(
         [CalibrationPoint(px, py, x, y) for _, px, py, x, y in rows],
         pixel_region=(154, 35, 533, 415),
-        physical_region=(0, 0, 160, 160),
+        physical_region=MACHINE_REGION,
     )
 
 
@@ -63,8 +66,8 @@ def calibration_rows(table):
         if not all(np.isfinite(values)):
             raise ValueError(f"{point_id} 必须填写有限数字")
         px, py, x, y = values
-        if not (0 <= px < 640 and 0 <= py < 480 and 0 <= x <= 160 and 0 <= y <= 160):
-            raise ValueError(f"{point_id} 超出仿真画幅或行程")
+        if not (0 <= px < 640 and 0 <= py < 480 and position_in_machine(x, y)):
+            raise ValueError(f'{point_id} 超出画幅或机械行程：X 0–{X_MAX_MM:g}、Y 0–{Y_MAX_MM:g} mm')
         rows.append((point_id, *values))
     return rows
 
@@ -83,8 +86,8 @@ def legacy_rows(path):
         for name in ids:
             px, py = map(float, by_id[name]["pixel"])
             x, y = map(float, by_id[name]["machine"])
-            if not (0 <= px < 640 and 0 <= py < 480 and 0 <= x <= 160 and 0 <= y <= 160):
-                raise ValueError(f"{name} 超出仿真画幅或行程")
+            if not (0 <= px < 640 and 0 <= py < 480 and position_in_machine(x, y)):
+                raise ValueError(f'{name} 超出画幅或机械行程：X 0–{X_MAX_MM:g}、Y 0–{Y_MAX_MM:g} mm')
             rows.append((name, px, py, x, y))
     except (KeyError, TypeError) as exc:
         raise ValueError("旧版标定点字段不完整") from exc
@@ -110,7 +113,7 @@ class CoordinateSpinBox(QDoubleSpinBox):
         self.setObjectName(f'coordinate_{row}_{column}')
         self.setLocale(QLocale.c())
         self.setDecimals(6)
-        maximum = {1: 639.999999, 2: 479.999999}.get(column, 160)
+        maximum = {1: 639.999999, 2: 479.999999, 3: X_MAX_MM, 4: Y_MAX_MM}[column]
         self.setRange(0, maximum)
         self.setSingleStep(1 if column < 3 else 0.1)
         self.setToolTip('每步 1 像素' if column < 3 else '每步 0.1 mm；点击 GOTO 才移动')
@@ -161,13 +164,14 @@ class CalibrationDialog(QDialog):
         super().__init__(console)
         self.console = console
         self.simulation = getattr(console, 'simulation_mode', True)
+        settings = normalize_frame_settings(getattr(console, 'calibration_frame', None))
         self.setWindowTitle("XY 九点标定 · 仿真" if self.simulation else "XY 九点标定 · 实机")
         self.resize(1000, 550)
         outer = QVBoxLayout(self)
         frame_bar = QHBoxLayout()
         outer.addLayout(frame_bar)
         self.frame_fields = []
-        for label, value in zip(('框 X', '框 Y', '框宽', '框高'), TRAY_ROI):
+        for label, value in zip(('框 X', '框 Y', '框宽', '框高'), settings['box']):
             frame_bar.addWidget(QLabel(label))
             editor = QDoubleSpinBox()
             editor.setLocale(QLocale.c())
@@ -181,12 +185,12 @@ class CalibrationDialog(QDialog):
         self.frame_inset = QDoubleSpinBox()
         self.frame_inset.setRange(0, 45)
         self.frame_inset.setSuffix('%')
-        self.frame_inset.setValue(15)
+        self.frame_inset.setValue(settings['inset_percent'])
         frame_bar.addWidget(self.frame_inset)
         frame_bar.addWidget(button('按框生成九点', self.generate_points))
         work = QHBoxLayout()
         outer.addLayout(work, 1)
-        self.view = CalibrationFrameView(TRAY_ROI, self.set_frame)
+        self.view = CalibrationFrameView(settings['box'], self.set_frame)
         work.addWidget(panel('标定框 · 框内拖动平移 / 四角缩放 / 框外重画', self.view), 1)
         self.points = QTableWidget(9, 5)
         self.points.setHorizontalHeaderLabels(("点位", "像素 X", "像素 Y", "机械 X/mm", "机械 Y/mm"))
@@ -202,8 +206,9 @@ class CalibrationDialog(QDialog):
         self.points.currentCellChanged.connect(self.draw_points)
         self.points.itemChanged.connect(self.draw_points)
         work.addWidget(self.points, 1)
-        self.status = QLabel("先确认仿真零点，再测试 GOTO 或升降。" if self.simulation else
-                             "手动对零并确认后，才可测试 GOTO 和升降；机械坐标单位为毫米。")
+        self.status = QLabel(f'机械范围 X 0–{X_MAX_MM:g}、Y 0–{Y_MAX_MM:g} mm；修改后请点保存标定。'
+                             '测试动作前需确认零点。')
+        self.status.setWordWrap(True)
         outer.addWidget(self.status)
         controls = QHBoxLayout()
         controls.addWidget(button("GOTO 选中点", self.goto_selected))
@@ -217,7 +222,7 @@ class CalibrationDialog(QDialog):
         controls.addWidget(button("关闭", self.reject))
         outer.addLayout(controls)
         self.points.setCurrentCell(0, 1)
-        self.set_frame(TRAY_ROI)
+        self.set_frame(settings['box'])
         for editor in self.frame_fields:
             editor.valueChanged.connect(self.frame_fields_changed)
         # Keep the live top camera visible while adjusting and testing alignment.
@@ -338,8 +343,9 @@ class CalibrationDialog(QDialog):
 
     def save_points(self):
         try:
-            self.console.save_calibration(calibration_rows(self.points))
-            self.status.setText("已保存仿真标定" if self.simulation else "已保存标定，请实测九点后确认")
+            frame = {'box': list(self.view.box), 'inset_percent': self.frame_inset.value()}
+            self.console.save_calibration(calibration_rows(self.points), frame=frame)
+            self.status.setText('已保存九点、标定框和内缩比例；请实测九点后确认。')
         except (AttributeError, OSError, ValueError) as exc:
             self.status.setText(str(exc))
 
@@ -355,6 +361,7 @@ class SimulationWindow(QMainWindow):
         super().__init__()
         self.machine = SimulatedSorter()
         self.calibration_path = Path(calibration_path) if calibration_path else ROOT / "data/simulation_calibration.json"
+        self.calibration_frame = normalize_frame_settings()
         self.frames = {role: sample_frame(role) for role in ROLES}
         self.setWindowTitle("YLERS · Xavier NX 分拣仿真台")
         self.setStyleSheet(STYLE)
@@ -518,6 +525,7 @@ class SimulationWindow(QMainWindow):
                 if len(rows) != 9 or any(len(row) != 5 for row in rows):
                     raise ValueError("需要九个标定点")
                 fit_calibration(rows)
+                self.calibration_frame = normalize_frame_settings(data.get('frame'))
         except (KeyError, OSError, TypeError, ValueError) as exc:
             rows = DEFAULT_POINTS
             self.write_log(f"仿真标定未加载：{exc}")
@@ -533,13 +541,14 @@ class SimulationWindow(QMainWindow):
         finally:
             dialog.deleteLater()
 
-    def save_calibration(self, rows):
+    def save_calibration(self, rows, frame=None):
         fit_calibration(rows)
+        frame = normalize_frame_settings(self.calibration_frame if frame is None else frame)
         self.calibration_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False, dir=str(self.calibration_path.parent)) as stream:
             temporary = Path(stream.name)
             try:
-                json.dump({"mode": "simulation", "points": rows}, stream, ensure_ascii=False, indent=2)
+                json.dump({"mode": "simulation", "points": rows, 'frame': frame}, stream, ensure_ascii=False, indent=2)
                 stream.flush()
                 os.fsync(stream.fileno())
             except Exception:
@@ -549,6 +558,7 @@ class SimulationWindow(QMainWindow):
         try:
             os.replace(str(temporary), str(self.calibration_path))
             self.calibration_rows = rows
+            self.calibration_frame = frame
         finally:
             if temporary.exists():
                 temporary.unlink()

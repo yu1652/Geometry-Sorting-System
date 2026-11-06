@@ -4,6 +4,7 @@ import re
 import time
 from collections import deque
 
+from motion_limits import X_MAX_MM, Y_MAX_MM, position_in_machine
 from sorter_simulation import SorterSnapshot
 
 
@@ -11,9 +12,7 @@ MCU_STATES = {'WAIT_START', 'IDLE', 'WAIT_PUSH', 'PUSHING', 'WAIT_SORT', 'SORTIN
 
 
 def _position(x, y):
-    return (type(x) in (int, float) and type(y) in (int, float)
-            and math.isfinite(x) and math.isfinite(y)
-            and 0 <= x <= 160 and 0 <= y <= 160)
+    return position_in_machine(x, y)
 
 
 class LiveController:
@@ -136,7 +135,7 @@ class LiveController:
         if not self.ready or not self._origin or self._state != 'armed' or self._pusher_down or self.pending:
             return self._reject('移动需要停机、原点确认、推板抬起且无待完成动作')
         if not _position(x, y):
-            return self._reject('XY 必须为 0 到 160 mm 内的有限数字')
+            return self._reject(f'XY 必须为 X 0 到 {X_MAX_MM:g}、Y 0 到 {Y_MAX_MM:g} mm 内的有限数字')
         self._target = (float('{:.3f}'.format(x)), float('{:.3f}'.format(y)))
         self._pending = 'goto'
         self._deadline = self._clock() + self._timeout
