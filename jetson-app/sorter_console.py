@@ -8,9 +8,11 @@ from pathlib import Path
 from app import QApplication, ImageView, QDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton, QVBoxLayout, QWidget, Qt, STYLE, panel
 
 try:
-    from PySide6.QtWidgets import QComboBox, QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit
+    from PySide6.QtCore import QLocale
+    from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFileDialog, QHeaderView, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTextEdit
 except ImportError:
-    from PyQt5.QtWidgets import QComboBox, QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit
+    from PyQt5.QtCore import QLocale
+    from PyQt5.QtWidgets import QComboBox, QDoubleSpinBox, QFileDialog, QHeaderView, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTextEdit
 
 import cv2
 import numpy as np
@@ -100,6 +102,59 @@ def sample_frame(role):
     return frame
 
 
+class CoordinateSpinBox(QDoubleSpinBox):
+    def __init__(self, parent, table, row, column):
+        super().__init__(parent)
+        self.table, self.row, self.column = table, row, column
+        self.setObjectName(f'coordinate_{row}_{column}')
+        self.setLocale(QLocale.c())
+        self.setDecimals(6)
+        maximum = {1: 639.999999, 2: 479.999999}.get(column, 160)
+        self.setRange(0, maximum)
+        self.setSingleStep(1 if column < 3 else 0.1)
+        self.setToolTip('每步 1 像素' if column < 3 else '每步 0.1 mm；点击 GOTO 才移动')
+
+    def textFromValue(self, value):
+        return format(value, '.6f').rstrip('0').rstrip('.')
+
+    def focusInEvent(self, event):
+        self.table.setCurrentCell(self.row, self.column)
+        super().focusInEvent(event)
+
+    def wheelEvent(self, event):
+        self.setFocus()
+        super().wheelEvent(event)
+
+
+class CoordinateDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, option, index):
+        editor = CoordinateSpinBox(parent, self.parent(), index.row(), index.column())
+        editor.valueChanged.connect(lambda: self.commitData.emit(editor))
+        return editor
+
+    def setEditorData(self, editor, index):
+        try:
+            value = float(index.data())
+        except (TypeError, ValueError):
+            return
+        if not np.isfinite(value):
+            return
+        blocked = editor.blockSignals(True)
+        try:
+            editor.setValue(value)
+        finally:
+            editor.blockSignals(blocked)
+
+    def setModelData(self, editor, model, index):
+        role = getattr(Qt, 'EditRole', None)
+        if role is None:
+            role = Qt.ItemDataRole.EditRole
+        model.setData(index, editor.value(), role)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
+
 class CalibrationDialog(QDialog):
     def __init__(self, console, rows):
         super().__init__(console)
@@ -114,6 +169,14 @@ class CalibrationDialog(QDialog):
         work.addWidget(panel("标定点 · 画面坐标", self.view), 1)
         self.points = QTableWidget(9, 5)
         self.points.setHorizontalHeaderLabels(("点位", "像素 X", "像素 Y", "机械 X/mm", "机械 Y/mm"))
+        self.points.setItemDelegate(CoordinateDelegate(self.points))
+        header = self.points.horizontalHeader()
+        stretch = getattr(QHeaderView, 'Stretch', None)
+        if stretch is None:
+            stretch = QHeaderView.ResizeMode.Stretch
+        self.points.setColumnWidth(0, 40)
+        for column in range(1, 5):
+            header.setSectionResizeMode(column, stretch)
         self.set_rows(rows)
         self.points.currentCellChanged.connect(self.draw_points)
         self.points.itemChanged.connect(self.draw_points)
@@ -140,6 +203,9 @@ class CalibrationDialog(QDialog):
         try:
             for r, row in enumerate(rows):
                 for c, value in enumerate(row):
+                    previous = self.points.item(r, c)
+                    if previous is not None and c > 0:
+                        self.points.closePersistentEditor(previous)
                     item = QTableWidgetItem(str(value) if c == 0 else format(float(value), "g"))
                     if c == 0:
                         editable = getattr(Qt, 'ItemIsEditable', None)
@@ -147,6 +213,9 @@ class CalibrationDialog(QDialog):
                             editable = Qt.ItemFlag.ItemIsEditable
                         item.setFlags(item.flags() & ~editable)
                     self.points.setItem(r, c, item)
+            for row in range(9):
+                for column in range(1, 5):
+                    self.points.openPersistentEditor(self.points.item(row, column))
         finally:
             self.points.blockSignals(blocked)
 

@@ -64,6 +64,67 @@ class SimulationConsoleTests(unittest.TestCase):
         dialog.reject()
         self.assertFalse(self.window.machine.snapshot().pusher_down)
 
+    def test_numeric_arrows_update_draft_without_moving_and_preserve_on_save(self):
+        from sorter_console import CoordinateSpinBox, calibration_rows
+        self.window.confirm_origin()
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(self.dispose, dialog)
+        pixel = dialog.findChild(CoordinateSpinBox, 'coordinate_0_1')
+        mechanical = dialog.findChild(CoordinateSpinBox, 'coordinate_0_3')
+        before = self.window.machine.snapshot()
+        self.assertEqual(pixel.singleStep(), 1)
+        self.assertEqual(mechanical.singleStep(), 0.1)
+        pixel.stepUp()
+        mechanical.stepUp()
+        self.assertEqual(calibration_rows(dialog.points)[0][1], 212)
+        self.assertAlmostEqual(calibration_rows(dialog.points)[0][3], 24.1)
+        self.assertEqual(self.window.machine.snapshot().log, before.log)
+        dialog.save_points()
+        restored = type(self.window)(calibration_path=self.calibration_path)
+        self.addCleanup(self.dispose, restored)
+        saved = restored.create_calibration_dialog()
+        self.addCleanup(self.dispose, saved)
+        self.assertAlmostEqual(saved.findChild(CoordinateSpinBox, 'coordinate_0_3').value(), 24.1)
+
+    def test_wheel_selects_point_updates_value_and_enforces_limits(self):
+        from sorter_console import CoordinateSpinBox, calibration_rows
+        try:
+            from PySide6.QtCore import QPoint, QPointF, Qt
+            from PySide6.QtGui import QWheelEvent
+        except ImportError:
+            from PyQt5.QtCore import QPoint, QPointF, Qt
+            from PyQt5.QtGui import QWheelEvent
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(self.dispose, dialog)
+        dialog.show()
+        self.app.processEvents()
+        editor = dialog.findChild(CoordinateSpinBox, 'coordinate_4_3')
+        event = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, 120),
+                            getattr(Qt, 'MouseButton', Qt).NoButton,
+                            getattr(Qt, 'KeyboardModifier', Qt).NoModifier,
+                            getattr(Qt, 'ScrollPhase', Qt).NoScrollPhase, False)
+        self.app.sendEvent(editor, event)
+        self.assertEqual(dialog.points.currentRow(), 4)
+        self.assertAlmostEqual(calibration_rows(dialog.points)[4][3], 80.1)
+        editor.setValue(160)
+        editor.stepUp()
+        self.assertEqual(editor.value(), 160)
+        editor.setValue(0)
+        editor.stepDown()
+        self.assertEqual(editor.value(), 0)
+
+    def test_typed_value_is_used_by_explicit_goto(self):
+        from sorter_console import CoordinateSpinBox
+        self.window.confirm_origin()
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(self.dispose, dialog)
+        editor = dialog.findChild(CoordinateSpinBox, 'coordinate_0_3')
+        editor.lineEdit().setText('32.7')
+        editor.interpretText()
+        self.assertEqual(self.window.machine.snapshot().x_mm, 0)
+        dialog.goto_selected()
+        self.assertAlmostEqual(self.window.machine.snapshot().x_mm, 32.7)
+
     def test_legacy_import_is_draft_until_saved(self):
         import yaml
         from sorter_console import DEFAULT_POINTS
