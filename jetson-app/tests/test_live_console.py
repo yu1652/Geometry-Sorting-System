@@ -121,6 +121,43 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertEqual(controller.snapshot().state, 'armed')
         return sent
 
+    def test_frame_draft_keeps_live_calibration_and_commands_unchanged_until_save(self):
+        from sorter_console import calibration_rows
+        sent = self.ready_manual_controller()
+        window = self.window
+        window.save_calibration(window.calibration_rows)
+        window.calibration_confirmed.setChecked(True)
+        saved = window.calibration_path.read_bytes()
+        sent.clear()
+        dialog = window.create_calibration_dialog()
+        self.addCleanup(dialog.reject)
+        dialog.frame_fields[0].setValue(180)
+        dialog.frame_fields[2].setValue(300)
+        dialog.frame_inset.setValue(20)
+        dialog.generate_points()
+        self.assertEqual(calibration_rows(dialog.points)[0][1], 240)
+        self.assertEqual(sent, [])
+        self.assertEqual(window.calibration_path.read_bytes(), saved)
+        self.assertTrue(window.calibration_confirmed.isChecked())
+        dialog.save_points()
+        self.assertFalse(window.calibration_confirmed.isChecked())
+        self.assertEqual(window.calibration_rows[0][1], 240)
+        self.assertEqual(sent, [])
+
+    def test_calibration_preview_refreshes_new_camera_frames_and_stops_on_close(self):
+        try:
+            from PySide6.QtTest import QTest
+        except ImportError:
+            from PyQt5.QtTest import QTest
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(dialog.reject)
+        dialog.show()
+        self.window.frames['top'] = np.full((480, 640, 3), 37, dtype=np.uint8)
+        QTest.qWait(220)
+        self.assertEqual(dialog.view.frame[470, 630].tolist(), [37, 37, 37])
+        dialog.reject()
+        self.assertFalse(dialog.preview_timer.isActive())
+
     def test_closing_calibration_while_down_is_pending_queues_up(self):
         sent = self.ready_manual_controller()
         dialog = self.window.create_calibration_dialog()

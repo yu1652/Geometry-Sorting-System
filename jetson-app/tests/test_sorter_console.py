@@ -144,6 +144,83 @@ class SimulationConsoleTests(unittest.TestCase):
         dialog.save_points()
         self.assertTrue(self.calibration_path.exists())
 
+    def test_frame_generates_pixel_grid_preserving_machine_coordinates_until_save(self):
+        from sorter_console import calibration_rows
+        self.window.confirm_origin()
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(self.dispose, dialog)
+        dialog.points.item(0, 3).setText('24.123456')
+        before = calibration_rows(dialog.points)
+        log = self.window.machine.snapshot().log
+        dialog.set_frame((180, 50, 300, 300))
+        self.assertEqual(calibration_rows(dialog.points), before)
+        dialog.generate_points()
+        rows = calibration_rows(dialog.points)
+        self.assertEqual([(r[1], r[2]) for r in rows],
+                         [(x, y) for y in (95, 200, 305) for x in (225, 330, 435)])
+        self.assertEqual([r[3:] for r in rows], [r[3:] for r in before])
+        self.assertEqual(self.window.machine.snapshot().log, log)
+        self.assertFalse(self.calibration_path.exists())
+        dialog.points.item(0, 1).setText('226')
+        dialog.save_points()
+        self.assertTrue(self.calibration_path.exists())
+        restored = type(self.window)(calibration_path=self.calibration_path)
+        self.addCleanup(self.dispose, restored)
+        self.assertEqual(restored.calibration_rows[0][1], 226)
+        self.assertEqual(restored.calibration_rows[0][3], 24.123456)
+        reloaded = restored.create_calibration_dialog()
+        self.addCleanup(self.dispose, reloaded)
+        self.assertEqual(calibration_rows(reloaded.points)[0][3], 24.123456)
+
+    def test_frame_grid_validates_bounds_and_inset(self):
+        from calibration_frame import frame_grid
+        self.assertEqual(frame_grid((0, 0, 639, 479), 0)[-1], (639, 479))
+        for box, inset in [((-1, 0, 100, 100), 15), ((10, 0, 640, 100), 15),
+                           ((0, 0, 0, 100), 15), ((0, 0, 100, 100), 50),
+                           ((0, 0, float('nan'), 100), 15)]:
+            with self.subTest(box=box, inset=inset), self.assertRaises(ValueError):
+                frame_grid(box, inset)
+
+    def test_frame_drag_maps_letterboxed_preview_and_does_not_move_machine(self):
+        try:
+            from PySide6.QtCore import QPoint, Qt
+            from PySide6.QtTest import QTest
+        except ImportError:
+            from PyQt5.QtCore import QPoint, Qt
+            from PyQt5.QtTest import QTest
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(self.dispose, dialog)
+        view = dialog.view
+        # Exercise a wide preview with horizontal letterboxing.
+        view.setParent(None)
+        self.addCleanup(self.dispose, view)
+        view.resize(800, 480)
+        view.show()
+        self.app.processEvents()
+        self.assertIsNone(view.image_position(20, 20))
+        self.assertEqual(view.image_position(280, 100), (200, 100))
+        before = self.window.machine.snapshot().log
+        rows = [dialog.points.item(0, c).text() for c in range(5)]
+        left = getattr(Qt, 'MouseButton', Qt).LeftButton
+        # Draw a new box outside the initial box, then translate its interior.
+        QTest.mousePress(view, left, pos=QPoint(90, 10))
+        QTest.mouseMove(view, QPoint(210, 130))
+        QTest.mouseRelease(view, left, pos=QPoint(210, 130))
+        self.assertEqual(view.box, (10, 10, 120, 120))
+        QTest.mousePress(view, left, pos=QPoint(150, 70))
+        QTest.mouseMove(view, QPoint(180, 90))
+        QTest.mouseRelease(view, left, pos=QPoint(180, 90))
+        self.assertEqual(view.box, (40, 30, 120, 120))
+        # Resize the bottom right corner.
+        QTest.mousePress(view, left, pos=QPoint(240, 150))
+        QTest.mouseMove(view, QPoint(260, 170))
+        QTest.mouseRelease(view, left, pos=QPoint(260, 170))
+        self.assertEqual(view.box, (40, 30, 140, 140))
+        self.assertEqual(self.window.machine.snapshot().log, before)
+        self.assertEqual([dialog.points.item(0, c).text() for c in range(5)], rows)
+        self.assertEqual(dialog.frame_fields[0].value(), 40)
+        self.assertEqual(dialog.frame_fields[2].value(), 140)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from app import QApplication, ImageView, QDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton, QVBoxLayout, QWidget, Qt, STYLE, panel
+from app import QApplication, ImageView, QDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton, QTimer, QVBoxLayout, QWidget, Qt, STYLE, panel
 
 try:
     from PySide6.QtCore import QLocale
@@ -19,6 +19,7 @@ import numpy as np
 import yaml
 
 from camera_service import CameraError, CameraSource
+from calibration_frame import CalibrationFrameView, frame_grid, validate_frame
 from media import MediaSource
 from sorter_simulation import SimulatedSorter
 from tray_locator import TrayLocator
@@ -161,12 +162,32 @@ class CalibrationDialog(QDialog):
         self.console = console
         self.simulation = getattr(console, 'simulation_mode', True)
         self.setWindowTitle("XY 九点标定 · 仿真" if self.simulation else "XY 九点标定 · 实机")
-        self.resize(960, 490)
+        self.resize(1000, 550)
         outer = QVBoxLayout(self)
+        frame_bar = QHBoxLayout()
+        outer.addLayout(frame_bar)
+        self.frame_fields = []
+        for label, value in zip(('框 X', '框 Y', '框宽', '框高'), TRAY_ROI):
+            frame_bar.addWidget(QLabel(label))
+            editor = QDoubleSpinBox()
+            editor.setLocale(QLocale.c())
+            editor.setDecimals(2)
+            editor.setRange(0, 639)
+            editor.setSingleStep(1)
+            editor.setValue(value)
+            frame_bar.addWidget(editor)
+            self.frame_fields.append(editor)
+        frame_bar.addWidget(QLabel('九点内缩'))
+        self.frame_inset = QDoubleSpinBox()
+        self.frame_inset.setRange(0, 45)
+        self.frame_inset.setSuffix('%')
+        self.frame_inset.setValue(15)
+        frame_bar.addWidget(self.frame_inset)
+        frame_bar.addWidget(button('按框生成九点', self.generate_points))
         work = QHBoxLayout()
         outer.addLayout(work, 1)
-        self.view = ImageView("顶部画面")
-        work.addWidget(panel("标定点 · 画面坐标", self.view), 1)
+        self.view = CalibrationFrameView(TRAY_ROI, self.set_frame)
+        work.addWidget(panel('标定框 · 框内拖动平移 / 四角缩放 / 框外重画', self.view), 1)
         self.points = QTableWidget(9, 5)
         self.points.setHorizontalHeaderLabels(("点位", "像素 X", "像素 Y", "机械 X/mm", "机械 Y/mm"))
         self.points.setItemDelegate(CoordinateDelegate(self.points))
@@ -196,7 +217,48 @@ class CalibrationDialog(QDialog):
         controls.addWidget(button("关闭", self.reject))
         outer.addLayout(controls)
         self.points.setCurrentCell(0, 1)
+        self.set_frame(TRAY_ROI)
+        for editor in self.frame_fields:
+            editor.valueChanged.connect(self.frame_fields_changed)
+        # Keep the live top camera visible while adjusting and testing alignment.
+        self.preview_timer = QTimer(self)
+        self.preview_timer.timeout.connect(self.draw_points)
+        self.preview_timer.start(150)
         self.draw_points()
+
+    def set_frame(self, box):
+        box = validate_frame(box)
+        self.view.box = box
+        x, y, width, height = box
+        limits = ((0, 639 - width), (0, 479 - height), (2, 639 - x), (2, 479 - y))
+        for editor, value, (minimum, maximum) in zip(self.frame_fields, box, limits):
+            blocked = editor.blockSignals(True)
+            try:
+                editor.setRange(0, 639)
+                editor.setValue(value)
+                editor.setRange(minimum, maximum)
+            finally:
+                editor.blockSignals(blocked)
+        self.draw_points()
+
+    def frame_fields_changed(self, *_):
+        self.set_frame(tuple(editor.value() for editor in self.frame_fields))
+
+    def generate_points(self):
+        try:
+            pixels = frame_grid(self.view.box, self.frame_inset.value())
+            calibration_rows(self.points)
+            blocked = self.points.blockSignals(True)
+            try:
+                for row, (px, py) in enumerate(pixels):
+                    for column, value in ((1, px), (2, py)):
+                        self.points.item(row, column).setText(format(value, '.6f').rstrip('0').rstrip('.'))
+            finally:
+                self.points.blockSignals(blocked)
+            self.draw_points()
+            self.status.setText('已按框生成像素点草稿，机械 X/Y 保留；请逐点微调后保存。')
+        except (AttributeError, ValueError) as exc:
+            self.status.setText(str(exc))
 
     def set_rows(self, rows):
         blocked = self.points.blockSignals(True)
@@ -206,7 +268,7 @@ class CalibrationDialog(QDialog):
                     previous = self.points.item(r, c)
                     if previous is not None and c > 0:
                         self.points.closePersistentEditor(previous)
-                    item = QTableWidgetItem(str(value) if c == 0 else format(float(value), "g"))
+                    item = QTableWidgetItem(str(value) if c == 0 else format(float(value), '.6f').rstrip('0').rstrip('.'))
                     if c == 0:
                         editable = getattr(Qt, 'ItemIsEditable', None)
                         if editable is None:
@@ -237,6 +299,12 @@ class CalibrationDialog(QDialog):
 
     def draw_points(self, *_):
         frame = cv2.resize(self.console.frames["top"], (640, 480))
+        x, y, width, height = self.view.box
+        left, top, right, bottom = map(round, (x, y, x + width, y + height))
+        cv2.rectangle(frame, (left, top), (right, bottom), (255, 220, 70), 2)
+        for corner in ((left, top), (right, top), (left, bottom), (right, bottom)):
+            cv2.rectangle(frame, (corner[0] - 4, corner[1] - 4),
+                          (corner[0] + 4, corner[1] + 4), (255, 220, 70), -1)
         try:
             rows = calibration_rows(self.points)
         except (AttributeError, ValueError):
@@ -276,6 +344,7 @@ class CalibrationDialog(QDialog):
             self.status.setText(str(exc))
 
     def done(self, result):
+        self.preview_timer.stop()
         if self.console.machine.snapshot().pusher_down or getattr(self.console.machine, 'pending', None) == 'down':
             self.move_pusher(False)
         super().done(result)
