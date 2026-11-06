@@ -6,6 +6,7 @@ same narrow TensorRT and CUDA interfaces directly into :class:`TensorRTBackend`.
 """
 
 import ctypes
+import hashlib
 import importlib
 import os
 import threading
@@ -183,13 +184,20 @@ def create_backend(engine_path, model_kind, device=0):
         engine_bytes = Path(engine_path).read_bytes()
     except OSError as exc:
         raise BackendUnavailable("cannot read TensorRT engine '%s': %s" % (engine_path, exc)) from exc
-    return TensorRTBackend(
+    provenance = {
+        'engine_path': str(Path(engine_path).resolve()),
+        'engine_sha256': hashlib.sha256(engine_bytes).hexdigest(),
+        'model_kind': model_kind,
+    }
+    backend = TensorRTBackend(
         engine_bytes,
         model_kind,
         trt_module,
         cuda_runtime,
         device=device,
     )
+    backend.provenance = provenance
+    return backend
 
 
 def _shape_nbytes(shape, dtype):

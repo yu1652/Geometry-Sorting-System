@@ -167,6 +167,36 @@ class LegacyRecognizerTests(unittest.TestCase):
         self.assertEqual(result.mask_status, ("no_detection", "no_detection"))
         np.testing.assert_array_equal(result.preview_bgr, np.hstack((self.left, self.right)))
 
+    def test_diagnostic_inputs_are_exact_and_independent_of_reused_backend_buffers(self):
+        raw = _raw(self.right_box)
+        recognizer = self.make_recognizer(raw)
+        self.detector.provenance = {'engine_path': 'model.engine', 'engine_sha256': 'a' * 64}
+        result = recognizer.recognize_pair(self.left, self.right)
+        evidence = result.diagnostics
+        tensor = self.detector.inputs[0]
+        expected = np.rint(tensor[0, :, 160:480].transpose(1, 2, 0)[:, :, ::-1] * 255).astype(np.uint8)
+        np.testing.assert_array_equal(evidence['features_bgr'], expected)
+        np.testing.assert_array_equal(evidence['pair_bgr'], np.hstack((self.left, self.right)))
+        self.assertFalse(evidence['preprocessed'])
+        self.assertEqual(evidence['class_names'], self.classes)
+        self.assertEqual(evidence['config'], self.config)
+        self.assertEqual(evidence['models']['detector']['engine_sha256'], 'a' * 64)
+        self.config['model']['confidence_threshold'] = .99
+        self.detector.provenance['engine_sha256'] = 'b' * 64
+        self.assertEqual(evidence['config']['model']['confidence_threshold'], .45)
+        self.assertEqual(evidence['models']['detector']['engine_sha256'], 'a' * 64)
+        before = raw.copy()
+        raw[:] = 0
+        self.left[:] = 0
+        np.testing.assert_array_equal(evidence['raw_output'], before)
+        self.assertTrue(evidence['pair_bgr'].any())
+
+    def test_detection_failure_keeps_input_for_diagnosis(self):
+        result = self.make_recognizer(RuntimeError('bad engine')).recognize_pair(self.left, self.right)
+        self.assertIn('bad engine', result.error)
+        self.assertEqual(result.diagnostics['features_bgr'].shape, (320, 640, 3))
+        self.assertNotIn('raw_output', result.diagnostics)
+
     def test_feature_image_runs_feature_mask_without_inventing_color(self):
         from unittest.mock import patch
         recognizer = self.make_recognizer(_raw(self.left_box, self.right_box), self.empty, self.ring)

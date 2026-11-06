@@ -509,6 +509,41 @@ class BackendContractTests(unittest.TestCase):
 
 
 class BackendInferenceAndLifecycleTests(unittest.TestCase):
+    def test_factory_provenance_identifies_loaded_bytes_without_reading_engine_again(self):
+        import trt_backend
+
+        for path_type in (str, Path):
+            with self.subTest(path_type=path_type), tempfile.TemporaryDirectory() as directory:
+                events = []
+                engine_path = Path(directory) / 'loaded.engine'
+                engine_path.write_bytes(b'abc')
+                expected_path = str(engine_path.resolve())
+                engine = FakeEngine(events)
+
+                class ConsumingRuntime(FakeRuntime):
+                    def deserialize_cuda_engine(self, engine_bytes):
+                        value = super().deserialize_cuda_engine(engine_bytes)
+                        engine_path.unlink()
+                        return value
+
+                class ConsumingTrt(FakeTrt):
+                    def Runtime(self, logger):
+                        self.runtime = ConsumingRuntime(self, logger)
+                        return self.runtime
+
+                trt = ConsumingTrt(engine)
+                with mock.patch.object(trt_backend.importlib, 'import_module', return_value=trt), \
+                        mock.patch.object(trt_backend, '_load_cuda_runtime', return_value=FakeCuda(events)):
+                    backend = trt_backend.create_backend(path_type(engine_path), 'yolo')
+                self.addCleanup(backend.close)
+                self.assertEqual(trt.deserialized, b'abc')
+                self.assertEqual(getattr(backend, 'provenance', None), {
+                    'engine_path': expected_path,
+                    'engine_sha256': 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+                    'model_kind': 'yolo',
+                })
+                backend.close()
+
     def test_infer_converts_input_and_orders_copy_execute_copy_sync(self):
         backend, engine, trt, cuda, events = make_backend("yolo", input_dtype="fp16")
         self.addCleanup(backend.close)

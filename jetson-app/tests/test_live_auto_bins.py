@@ -30,7 +30,7 @@ class Port:
 class Vision:
     def locate(self, *args):
         return True
-    def recognize(self, *args):
+    def recognize(self, *args, **kwargs):
         return True
     def shutdown(self):
         pass
@@ -79,6 +79,94 @@ class AutomaticBinUiTests(unittest.TestCase):
         self.window.machine.handle_mcu('SCAN')
         self.window._dispatch_vision()
         self.window.on_recognized(self.window._job[0], result)
+        if self.window.machine.snapshot().state == 'recognizing':
+            self.window._scan_next_at = 0
+            self.window._dispatch_vision()
+            self.window.on_recognized(self.window._job[0], result)
+
+    def arrive_for_scan(self):
+        self.start_round()
+        self.window.machine.handle_mcu('PUSH?')
+        self.window._dispatch_vision()
+        self.window.on_located(self.window._job[0], (50, 50))
+        self.window.machine.handle_mcu('SCAN')
+        self.window._dispatch_vision()
+
+    def result(self, shape='yuan_zhu', color='蓝色'):
+        return SimpleNamespace(error=None,
+            detection=SimpleNamespace(class_name=shape, confidence=.9) if shape else None,
+            color=SimpleNamespace(name=color, confidence=.9, valid_pixels=100) if color else None,
+            preview_bgr=np.zeros((320,640,3), np.uint8), elapsed_ms=100)
+
+    def finish_scan(self, result):
+        if self.window._job is None:
+            self.window._scan_next_at = 0
+            self.window._dispatch_vision()
+        self.window.on_recognized(self.window._job[0], result)
+
+    def test_empty_early_frame_is_recaptured_before_binding_and_two_matching_reads_sort_once(self):
+        self.arrive_for_scan()
+        self.finish_scan(self.result(None, None))
+        self.assertEqual(self.window.machine.snapshot().state, 'recognizing')
+        self.assertEqual(self.window.bindings, {})
+        self.finish_scan(self.result())
+        self.assertEqual(self.window.bindings, {})
+        self.assertFalse(any(line.startswith('SORT,') for line in self.sent))
+        self.finish_scan(self.result())
+        self.assertEqual([s for s in self.sent if s.startswith('SORT,')], ['SORT,1'])
+
+    def test_changed_shape_resets_stability_and_stop_discards_pending_result(self):
+        self.arrive_for_scan()
+        self.finish_scan(self.result('yuan_tai'))
+        self.finish_scan(self.result('yuan_zhu'))
+        self.assertEqual(self.window.bindings, {})
+        self.window._scan_next_at = 0
+        self.window._dispatch_vision()
+        token = self.window._job[0]
+        self.window.stop()
+        self.window.on_recognized(token, self.result('yuan_zhu'))
+        self.assertFalse(any(s.startswith('SORT,') for s in self.sent))
+        self.assertEqual(self.window.bindings, {})
+
+    def test_eight_invalid_reads_stop_without_sort_and_are_available_in_diagnostic_export(self):
+        from zipfile import ZipFile
+        self.arrive_for_scan()
+        for _ in range(8):
+            self.finish_scan(self.result(None, None))
+        self.assertEqual(self.window.machine.snapshot().state, 'stopped')
+        self.assertEqual(self.window.bindings, {})
+        self.assertFalse(any(s.startswith('SORT,') for s in self.sent))
+        with patch.object(QMessageBox, 'information'):
+            path = self.window.export_diagnostics()
+        with ZipFile(path) as bundle:
+            log = bundle.read('live_runtime.log').decode('utf8')
+            self.assertIn('8/8', log)
+            self.assertTrue(any(n.startswith('diagnostic_samples/') for n in bundle.namelist()))
+
+    def test_automatic_waits_for_settlement_manual_uses_same_recognizer_without_settlement(self):
+        with patch.object(self.window.vision, 'recognize', return_value=True) as recognize:
+            self.arrive_for_scan()
+            recognize.assert_called_once_with(self.window._job[0], settle=True)
+        self.window.stop()
+        self.window._job = None
+        with patch.object(self.window.vision, 'recognize', return_value=True) as recognize:
+            self.assertTrue(self.window.manual_recognize())
+            recognize.assert_called_once_with(self.window._job[0])
+
+    def test_model_initialization_can_take_more_than_preview_limit_but_action_timeout_remains(self):
+        self.arrive_for_scan()
+        before = time.monotonic()
+        self.window.machine._clock = lambda: before + 10.1
+        self.window._frames_at = before
+        with patch('live_console.time.monotonic', return_value=before + 10.1):
+            self.window.poll_serial()
+        self.assertEqual(self.window.machine.snapshot().state, 'recognizing')
+        self.assertNotIn('STOP', self.sent)
+        self.window.machine._clock = lambda: before + 31
+        with patch('live_console.time.monotonic', return_value=before + 31):
+            self.window.poll_serial()
+        self.assertEqual(self.window.machine.snapshot().state, 'stopped')
+        self.assertIn('STOP', self.sent)
 
     def done(self, duplicate=False):
         self.port.data = b'DONE\nDONE\n' if duplicate else b'DONE\n'

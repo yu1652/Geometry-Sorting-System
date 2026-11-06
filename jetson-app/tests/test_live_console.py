@@ -31,7 +31,7 @@ class FakePort:
 
 
 class FakeVision:
-    def recognize(self, token):
+    def recognize(self, token, settle=False):
         return True
 
     def locate(self, *args):
@@ -376,6 +376,10 @@ class LiveConsoleTests(unittest.TestCase):
             detection=SimpleNamespace(class_name='yuan_zhu', confidence=.9),
             color=SimpleNamespace(name='蓝色', confidence=.8, valid_pixels=100),
             preview_bgr=np.zeros((320, 640, 3), np.uint8), elapsed_ms=100)
+        window.on_recognized(window._job[0], result)
+        self.assertNotIn('SORT,1', sent)
+        window._scan_next_at = 0
+        window._dispatch_vision()
         window.on_recognized(window._job[0], result)
         self.assertIn('SORT,1', sent)
         self.assertEqual(window.records.rowCount(), 0)

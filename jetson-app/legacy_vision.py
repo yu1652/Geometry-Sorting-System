@@ -2,6 +2,7 @@
 
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil, floor
 from typing import Optional, Tuple
@@ -65,6 +66,7 @@ class LegacyResult:
     surface_boxes: tuple = (None, None)
     hole_counts: tuple = (None, None)
     color_sources: tuple = ('none', 'none')
+    diagnostics: Optional[dict] = None
 
 
 class LegacyRecognizer:
@@ -89,11 +91,23 @@ class LegacyRecognizer:
         started = time.perf_counter()
         stitched, tensor, transform = prepare_legacy_pair(left_bgr, right_bgr, preprocessed=preprocessed)
         preview = stitched.copy()
+        diagnostics = {
+            'pair_bgr': stitched.copy(),
+            # Save the exact prepared detector input, without letterbox padding.
+            'features_bgr': np.rint(tensor[0, :, 160:480].transpose(1, 2, 0)[:, :, ::-1] * 255).astype(np.uint8),
+            'preprocessed': bool(preprocessed),
+            'class_names': list(self._class_names),
+            'config': deepcopy(self._config),
+            'models': {'detector': deepcopy(getattr(self._detector, 'provenance', None)),
+                       'segmenter': deepcopy(getattr(self._segmenter, 'provenance', None))},
+        }
 
         model = self._config.get("model", {})
         try:
+            raw_output = self._detector.infer(tensor)
+            diagnostics['raw_output'] = np.array(raw_output, copy=True)
             detections = decode_yolo_raw(
-                self._detector.infer(tensor),
+                raw_output,
                 transform,
                 self._class_names,
                 model.get("confidence_threshold", 0.45),
@@ -104,6 +118,7 @@ class LegacyRecognizer:
             return LegacyResult(
                 None, None, ("detection_error", "detection_error"), preview,
                 (time.perf_counter() - started) * 1000, str(exc) or type(exc).__name__,
+                diagnostics=diagnostics,
             )
 
         sides = ([], [])
@@ -176,6 +191,7 @@ class LegacyRecognizer:
             (time.perf_counter() - started) * 1000,
             surface_boxes=tuple(surface_boxes), hole_counts=tuple(hole_counts),
             color_sources=tuple(color_sources),
+            diagnostics=diagnostics,
         )
 
     def _surface(self, tensor, candidates):

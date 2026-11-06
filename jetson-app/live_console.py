@@ -30,6 +30,8 @@ from legacy_vision import surface_summary
 from calibration_frame import normalize_frame_settings
 from motion_limits import X_MAX_MM, Y_MAX_MM, position_in_machine
 from auto_bins import AutoBinSession, CapacityFull
+from runtime_diagnostics import RuntimeDiagnostics
+from scan_gate import ScanConsensus
 from sorter_console import (CalibrationDialog, DEFAULT_POINTS, TRAY_ROI,
                             button, fit_calibration)
 
@@ -80,6 +82,11 @@ class LiveWindow(QMainWindow):
         self.calibration_path = self.data_dir / 'live_calibration.json'
         self.auto_bins_path = self.data_dir / 'live_auto_bins.json'
         self.device_path = self.data_dir / 'live_devices.json'
+        self.diagnostics = RuntimeDiagnostics(self.data_dir)
+        self._diagnostic_log_error = False
+        self._scan_gate = None
+        self._scan_epoch = None
+        self._scan_next_at = 0
         self.calibration_frame = normalize_frame_settings()
         self.names = (ROOT / 'models/legacy_classes.txt').read_text(encoding='utf8').splitlines()
         self.sources = dict(DEFAULT_SOURCES)
@@ -114,6 +121,7 @@ class LiveWindow(QMainWindow):
         self.timer.timeout.connect(self.poll_serial)
         self.timer.start(40)
         self.write_log('实机入口已打开。先连接相机与串口，手动对零后确认。')
+        self.write_log('自动识别：模型就绪后重新取图，等待至少 0.8 秒；最多复核 8 次，连续两次形状和颜色一致才投箱。')
 
     def _make_ui(self):
         root = QWidget()
@@ -134,6 +142,8 @@ class LiveWindow(QMainWindow):
         connection.addWidget(self.camera_button)
         connection.addWidget(button('相机设置', self.camera_settings))
         connection.addWidget(button('模型管理', self.open_models))
+        self.diagnostic_button = button('导出诊断', self.export_diagnostics)
+        connection.addWidget(self.diagnostic_button)
         outer.addLayout(connection)
         self.pages = QStackedWidget()
         outer.addWidget(self.pages, 1)
@@ -212,8 +222,52 @@ class LiveWindow(QMainWindow):
     def write_log(self, message):
         line = datetime.now().strftime('%H:%M:%S') + ' ' + str(message)
         self.log_view.append(line)
+        self._persist_log(message)
         self.statusBar().showMessage(str(message))
         self.update_state()
+
+    def _persist_log(self, message):
+        try:
+            self.diagnostics.log(message)
+            self._diagnostic_log_error = False
+        except (OSError, ValueError) as error:
+            if not self._diagnostic_log_error:
+                self.log_view.append('诊断日志保存失败：' + str(error))
+                self._diagnostic_log_error = True
+
+    def _save_diagnostic(self, result, token, kind):
+        evidence = getattr(result, 'diagnostics', None) or {}
+        context = {'token': token, 'epoch': self.machine.epoch, 'kind': kind,
+                   'machine_state': self.machine.snapshot().state,
+                   'scan_attempt': self._scan_gate.attempts + 1 if kind == 'sort' and self._scan_gate else None,
+                   'preprocessed': evidence.get('preprocessed', False),
+                   'class_names': evidence.get('class_names', self.names),
+                   'recognizer_config': evidence.get('config'),
+                   'models': evidence.get('models'),
+                   'capture': evidence.get('capture'), 'sources': self.sources}
+        try:
+            path = self.diagnostics.save_sample(result, context)
+            self.write_log('识别样本已保存：' + str(path))
+        except (OSError, ValueError, TypeError, cv2.error) as error:
+            self.write_log('识别样本保存失败：' + str(error))
+
+    def export_diagnostics(self):
+        if self.machine.snapshot().state in AUTO_STATES or self.machine.pending:
+            self.write_log('请先停止自动流程并等待动作确认，再导出诊断。')
+            return None
+        try:
+            path = self.diagnostics.export(
+                extra_files=(ROOT / 'legacy_vision.yaml', ROOT / 'models/legacy_classes.txt',
+                             self.calibration_path, self.device_path, self.auto_bins_path,
+                             ROOT / 'data/model_store/active.json'),
+                metadata={'application': 'YLERS live console', 'sources': self.sources,
+                          'state': self.machine.snapshot().state, 'class_names': self.names})
+            self.write_log('诊断包已导出：' + str(path))
+            QMessageBox.information(self, '诊断已导出', '请把这个文件传回电脑：\n' + str(path))
+            return path
+        except (OSError, ValueError, TypeError) as error:
+            self.write_log('诊断导出失败：' + str(error))
+            return None
 
     def update_state(self):
         state = self.machine.snapshot()
@@ -235,6 +289,7 @@ class LiveWindow(QMainWindow):
             raise SerialTransportError('串口未连接')
         self.transport.write_line(line)
         self.log_view.append('HOST ' + line)
+        self._persist_log('HOST ' + line)
 
     def connect_serial(self):
         if self._models_open() or self._closing:
@@ -309,6 +364,7 @@ class LiveWindow(QMainWindow):
                     for line in self.transport.read_lines():
                         previous = self.machine.snapshot().completed_count
                         self.log_view.append('MCU ' + line)
+                        self._persist_log('MCU ' + line)
                         handled = self.machine.handle_mcu(line)
                         if self.machine.snapshot().completed_count > previous:
                             self.record_completion()
@@ -470,8 +526,14 @@ class LiveWindow(QMainWindow):
         return self._command(self.machine.start, '启动请求已发送。')
 
     def _automatic_ready(self):
+        # A cold TensorRT initialization can temporarily pause previews. The
+        # matching in-flight job remains bounded by LiveController's action
+        # deadline; its final inference frames must still be read after loading.
+        pending_capture = (self._job is not None and self._job[1] == self.machine.epoch
+                           and self._job[2] in ('locate', 'sort')
+                           and self.machine.snapshot().state in ('locating', 'recognizing'))
         return (self.machine.ready and self.vision is not None and self._frames_at is not None
-                and time.monotonic() - self._frames_at <= 10
+                and (time.monotonic() - self._frames_at <= 10 or pending_capture)
                 and self.calibration_valid and self.calibration_confirmed.isChecked()
                 and self._round_available(in_flight=True) and not self._models_open()
                 and self._disconnect_deadline is None)
@@ -508,7 +570,8 @@ class LiveWindow(QMainWindow):
                     raise ValueError('请先保存九点标定。')
                 accepted = self.vision.locate(token, validate_points(self.calibration_rows), TRAY_ROI, (4, 0))
             else:
-                accepted = self.vision.recognize(token)
+                accepted = self.vision.recognize(token, settle=True) if kind == 'sort' else self.vision.recognize(token)
+            self.write_log('视觉请求 token=%s epoch=%s kind=%s' % (token, self.machine.epoch, kind))
         except Exception as error:
             self._job = None
             self.write_log('视觉请求失败：' + str(error))
@@ -536,6 +599,13 @@ class LiveWindow(QMainWindow):
             return
         state = self.machine.snapshot().state
         if state in ('locating', 'recognizing'):
+            if state == 'recognizing':
+                if self._scan_epoch != self.machine.epoch:
+                    self._scan_epoch = self.machine.epoch
+                    self._scan_gate = ScanConsensus()
+                    self._scan_next_at = 0
+                if time.monotonic() < self._scan_next_at:
+                    return
             if not self._request('locate' if state == 'locating' else 'sort'):
                 self.stop()
 
@@ -549,9 +619,11 @@ class LiveWindow(QMainWindow):
     def on_recognized(self, token, result):
         kind = self._take_job(token)
         if kind is None:
+            self._persist_log('丢弃过期识别结果 token=%s epoch=%s' % (token, self.machine.epoch))
             return
+        self._save_diagnostic(result, token, kind)
         if result.error:
-            self.on_vision_failed(token, result.error)
+            self.write_log('视觉失败：' + str(result.error))
             if kind == 'sort':
                 self.stop()
             return
@@ -565,6 +637,9 @@ class LiveWindow(QMainWindow):
         color_sources = getattr(result, 'color_sources', ('none', 'none'))
         self.write_log(surface_summary(result) + '；取色 左：%s / 右：%s' % tuple(
             sources.get(source, source) for source in color_sources))
+        self.write_log('识别结果 token=%s kind=%s shape=%s shape_conf=%s color=%s color_conf=%s pixels=%s elapsed_ms=%.1f' % (
+            token, kind, shape, getattr(detection, 'confidence', None), color_name,
+            getattr(color, 'confidence', None), getattr(color, 'valid_pixels', None), result.elapsed_ms))
         self.preview.show_frame(result.preview_bgr)
         if kind == 'sort':
             if not self._automatic_ready() or self.machine.snapshot().state != 'recognizing':
@@ -573,9 +648,20 @@ class LiveWindow(QMainWindow):
             usable = (detection is not None and color is not None and color.valid_pixels > 0
                       and np.isfinite(color.confidence) and color.confidence >= 0.35
                       and shape in self.names and color_name in COLORS)
-            if not usable:
-                self.write_log('形状或颜色识别不确定，未分配箱号，流程已停止。')
+            if self._scan_gate is None or self._scan_epoch != self.machine.epoch:
+                self.write_log('缺少本件复核记录，未发送投箱指令。')
                 self.stop()
+                return
+            decision = self._scan_gate.observe((shape, color_name) if usable else None)
+            self.write_log('自动复核 %s/%s：%s / %s，连续一致 %s/%s' % (
+                self._scan_gate.attempts, self._scan_gate.max_attempts, shape, color_name,
+                self._scan_gate.matches, self._scan_gate.required_matches))
+            if decision == 'retry':
+                self._scan_next_at = time.monotonic() + .25
+                return
+            if decision == 'exhausted':
+                self.stop()
+                self.write_log('8 次复核未得到连续一致的有效形状和颜色，未分配箱号、未投箱。请导出诊断。')
                 return
             try:
                 # Persist the reservation before sending SORT. A missing DONE

@@ -1,5 +1,6 @@
 import threading
 import unittest
+from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -96,7 +97,7 @@ class LiveVisionTests(unittest.TestCase):
                 open_live_capture('/dev/v4l/by-path/top')
         capture.release.assert_called_once()
 
-    def worker(self, *, shape=(480, 640, 3), fail_at=None, recognizer_factory=None, tray_factory=None):
+    def worker(self, *, shape=(480, 640, 3), fail_at=None, recognizer_factory=None, tray_factory=None, **settings):
         events, captures = [], {}
 
         def capture_factory(path):
@@ -106,13 +107,182 @@ class LiveVisionTests(unittest.TestCase):
 
         worker = LiveVisionWorker(SOURCES, capture_factory=capture_factory,
                                   recognizer_factory=recognizer_factory,
-                                  tray_factory=tray_factory)
+                                  tray_factory=tray_factory, **settings)
         results, failures, previews = [], [], []
         worker.recognition_ready.connect(lambda token, result: (results.append((token, result)), worker.shutdown()))
         worker.location_ready.connect(lambda token, result: (results.append((token, result)), worker.shutdown()))
         worker.failed.connect(lambda token, error: (failures.append((token, error)), worker.shutdown()))
         worker.frames_ready.connect(previews.append)
         return worker, events, captures, results, failures, previews
+
+    def test_manual_recognition_discards_frames_captured_before_lazy_model_load(self):
+        worker, events, captures, results, failures, _ = self.worker()
+        loaded_counts = {}
+
+        def load():
+            loaded_counts.update({role: cap.read_count for role, cap in captures.items()})
+            return Recognizer(events)
+
+        worker.recognizer_factory = load
+        worker.recognize(13)
+        worker.run()
+        self.assertEqual(failures, [])
+        self.assertEqual(results[0][0], 13)
+        call = next(event for event in events if event[0] == 'recognize')
+        self.assertGreaterEqual(call[1] - 20, loaded_counts['left'] + 4)
+        self.assertGreaterEqual(call[2] - 80, loaded_counts['right'] + 4)
+
+    def test_automatic_recognition_keeps_previewing_until_object_arrives_after_load(self):
+        now, loaded_at, calls = [0.0], [], []
+        worker, _, captures, results, failures, previews = self.worker(clock=lambda: now[0])
+
+        class Model:
+            def recognize_pair(self, left, right):
+                calls.append((now[0], int(left[0, 0, 0]), int(right[0, 0, 0])))
+                return SimpleNamespace(error=None, diagnostics={})
+
+            def close(self):
+                pass
+
+        def load():
+            now[0] += 2.0  # TensorRT initialization is slow.
+            loaded_at.append(now[0])
+            for role, capture in captures.items():
+                old_read = capture.read
+
+                def read(old_read=old_read, role=role):
+                    ok, frame = old_read()
+                    frame.fill(200 if now[0] >= loaded_at[0] + .6 else 0)
+                    if role == 'top':
+                        now[0] += .1
+                    return ok, frame
+
+                capture.read = read
+            return Model()
+
+        worker.recognizer_factory = load
+        self.assertTrue(worker.recognize(14, settle=True))
+        worker.run()
+        self.assertEqual(failures, [])
+        self.assertEqual(results[0][0], 14)
+        self.assertGreaterEqual(calls[0][0] - loaded_at[0], .8)
+        self.assertEqual(calls[0][1:], (200, 200))
+        self.assertGreaterEqual(len(previews), 9)
+        timing = results[0][1].diagnostics['capture']
+        self.assertTrue(timing['settle_requested'])
+        self.assertEqual(timing['settle_seconds'], .8)
+        self.assertGreaterEqual(timing['capture_completed_monotonic'] - loaded_at[0], .8)
+        self.assertEqual(timing['inference_completed_monotonic'], calls[0][0])
+
+    def test_shutdown_during_settling_never_runs_inference_and_closes_model(self):
+        now, loaded, closed, inference = [0.0], [], [], []
+        worker, _, captures, results, failures, previews = self.worker(clock=lambda: now[0])
+
+        class Model:
+            def recognize_pair(self, left, right):
+                inference.append(True)
+                return SimpleNamespace(error=None)
+
+            def close(self):
+                closed.append(threading.get_ident())
+
+        def load():
+            loaded.append(threading.get_ident())
+            return Model()
+
+        def preview(frames):
+            if loaded:
+                now[0] += .1
+                if now[0] >= .2:
+                    worker.shutdown()
+
+        worker.recognizer_factory = load
+        worker.frames_ready.connect(preview)
+        worker.recognize(15, settle=True)
+        worker.run()
+        self.assertEqual(inference, [])
+        self.assertEqual(results, [])
+        self.assertEqual(failures, [])
+        self.assertEqual(closed, loaded)
+        self.assertTrue(all(cap.close_count == 1 for cap in captures.values()))
+
+    def test_diagnostic_capture_snapshots_and_timestamps_survive_error_results(self):
+        for error in (None, 'No target detected'):
+            with self.subTest(error=error):
+                now, captured = [10.0], []
+                diagnostic = {'model': 'legacy'}
+                result = SimpleNamespace(error=error, diagnostics=diagnostic)
+                worker, _, _, results, failures, previews = self.worker(clock=lambda: now[0])
+
+                class Model:
+                    def recognize_pair(self, left, right):
+                        left.fill(0)  # Evidence must survive a mutating backend.
+                        now[0] += .2
+                        return result
+
+                    def close(self):
+                        pass
+
+                def load():
+                    now[0] += 2.0
+                    return Model()
+
+                def preview(frames):
+                    captured[:] = [{role: frame.copy() for role, frame in frames.items()}]
+                    now[0] += .1
+
+                worker.recognizer_factory = load
+                worker.frames_ready.connect(preview)
+                worker.recognize(19)
+                worker.run()
+                self.assertEqual(failures, [])
+                self.assertEqual(results, [(19, result)])
+                self.assertEqual(diagnostic['model'], 'legacy')
+                self.assertEqual(set(diagnostic['captures']), {'left', 'right', 'top'})
+                for role, frame in diagnostic['captures'].items():
+                    np.testing.assert_array_equal(frame, captured[0][role])
+                    self.assertFalse(np.shares_memory(frame, previews[-1][role]))
+                timing = diagnostic['capture']
+                self.assertFalse(timing['settle_requested'])
+                self.assertEqual(timing['settle_seconds'], 0)
+                self.assertEqual(timing['drain_batches'], 4)
+                self.assertEqual(timing['request_received_monotonic'], 10.0)
+                self.assertAlmostEqual(timing['capture_completed_monotonic'], 12.6)
+                self.assertAlmostEqual(timing['inference_completed_monotonic'], 12.8)
+
+    def test_idle_preview_pumps_cameras_without_waiting_for_a_request(self):
+        now, preview_times = [0.0], []
+        worker, _, captures, _, failures, _ = self.worker(clock=lambda: now[0])
+
+        class Mailbox(Queue):
+            def get(self, block=True, timeout=None):
+                if block:
+                    now[0] += timeout or 1
+                return super().get(block=False)
+
+        def preview(frames):
+            preview_times.append(now[0])
+            if len(preview_times) == 4:
+                worker.shutdown()
+
+        worker._requests = Mailbox(maxsize=1)
+        worker.frames_ready.connect(preview)
+        with patch.object(worker._stopping, 'wait', side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            worker.run()
+        self.assertEqual(failures, [])
+        self.assertEqual(len(preview_times), 4)
+        self.assertLessEqual(preview_times[-1] - preview_times[0], .02)
+        self.assertTrue(all(cap.close_count == 1 for cap in captures.values()))
+
+    def test_invalid_capture_timing_cannot_create_unbounded_or_empty_drain(self):
+        for settings in ({'scan_settle_seconds': float('nan')},
+                         {'scan_settle_seconds': float('inf')},
+                         {'scan_settle_seconds': -1}, {'scan_settle_seconds': 31},
+                         {'drain_batches': 0}, {'drain_batches': 101},
+                         {'drain_batches': 1.5}, {'drain_batches': True},
+                         {'clock': None}):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                self.worker(**settings)
 
     def test_recognition_uses_fresh_raw_frames_in_training_order_and_releases_all(self):
         models = []
@@ -137,7 +307,7 @@ class LiveVisionTests(unittest.TestCase):
         self.assertEqual(models[0].owner, models[0].close_thread)
 
     def test_location_uses_roi_and_offsets_and_lazily_closes_tray_backend(self):
-        backends = []
+        backends, load_counts = [], []
 
         class Backend:
             def __init__(self):
@@ -153,11 +323,12 @@ class LiveVisionTests(unittest.TestCase):
                 self.closed = True
 
         def factory():
+            load_counts.append(captures['top'].read_count)
             backend = Backend()
             backends.append(backend)
             return backend
 
-        worker, _, _, results, failures, _ = self.worker(tray_factory=factory)
+        worker, _, captures, results, failures, _ = self.worker(tray_factory=factory)
         worker.locate(9, Calibration(), (10, 20, 20, 20), (4, 3))
         self.assertEqual(backends, [])
         worker.run()
@@ -166,6 +337,8 @@ class LiveVisionTests(unittest.TestCase):
         np.testing.assert_allclose(results[0][1], (26, 33))
         self.assertTrue(backends[0].closed)
         self.assertEqual(backends[0].tensor.shape, (1, 3, 640, 640))
+        self.assertAlmostEqual(float(backends[0].tensor[0, 0, 320, 320]),
+                               (140 + load_counts[0] + 4) / 255, places=6)
 
     def test_camera_loss_does_not_reuse_last_preview_for_recognition(self):
         worker, _, captures, results, failures, previews = self.worker(fail_at=4)
