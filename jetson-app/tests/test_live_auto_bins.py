@@ -34,6 +34,8 @@ class Vision:
         return True
     def shutdown(self):
         pass
+    def capture_empty(self, token):
+        return True
 
 
 class AutomaticBinUiTests(unittest.TestCase):
@@ -167,6 +169,111 @@ class AutomaticBinUiTests(unittest.TestCase):
             self.window.poll_serial()
         self.assertEqual(self.window.machine.snapshot().state, 'stopped')
         self.assertIn('STOP', self.sent)
+
+    def presence_result(self, state):
+        from scene_presence import PresenceResult
+        self.window.empty_reference = SimpleNamespace(assess=lambda *args: PresenceResult(state, 'test scene', {}))
+        result = self.result(None, None)
+        result.diagnostics = {'captures': self.window.frames}
+        return result
+
+    def test_three_empty_station_observations_request_new_location_without_bin_or_count(self):
+        self.arrive_for_scan()
+        empty = self.presence_result('empty')
+        for _ in range(2):
+            self.finish_scan(empty)
+            self.assertEqual(self.window.machine.snapshot().state, 'recognizing')
+        self.finish_scan(empty)
+        self.assertEqual(self.sent[-1], 'PUSH,WAIT')
+        self.assertEqual(self.window.machine.snapshot().state, 'wait_repush')
+        self.assertEqual(self.window.bindings, {})
+        self.assertIsNone(self.window.auto_bins.pending)
+        self.assertEqual(self.window.auto_bins.total, 0)
+        self.assertFalse(any(s.startswith('SORT,') for s in self.sent))
+        self.assertEqual(self.window.machine.snapshot().completed_count, 0)
+        self.window.machine.handle_mcu('STATUS,PUSH,WAIT')
+        self.window.machine.handle_mcu('PUSH?')
+        self.window._dispatch_vision()
+        self.assertEqual(self.window._job[2], 'locate')
+        self.assertIn('新一轮', self.window.log_view.toPlainText())
+
+    def test_real_empty_reference_drives_retry_and_sample_keeps_exact_reference(self):
+        from hashlib import sha256
+        from zipfile import ZipFile
+        yy, xx = np.indices((480,640))
+        gray = (95 + xx % 41 + yy % 31).astype(np.uint8)
+        frame = np.repeat(gray[:, :, None], 3, axis=2)
+        captures = {'left':frame, 'right':frame.copy()}
+        self.window.empty_reference.record(captures, self.window.sources)
+        reference = self.window.empty_reference.path.read_bytes()
+        self.arrive_for_scan()
+        result = self.result(None, None)
+        result.diagnostics = {'captures': captures}
+        for _ in range(3):
+            self.finish_scan(result)
+        self.assertEqual(self.sent[-1], 'PUSH,WAIT')
+        sample = next((self.window.data_dir / 'diagnostic_samples').glob('*.zip'))
+        with ZipFile(sample) as bundle:
+            self.assertEqual(bundle.read('empty_reference.npz'), reference)
+            metadata = json.loads(bundle.read('metadata.json'))
+            self.assertEqual(metadata['context']['presence']['reference_sha256'], sha256(reference).hexdigest())
+            self.assertEqual(metadata['context']['presence']['state'], 'empty')
+
+    def test_occupied_but_unclassified_never_requests_another_push(self):
+        self.arrive_for_scan()
+        occupied = self.presence_result('occupied')
+        before = len(self.sent)
+        for _ in range(8):
+            self.finish_scan(occupied)
+        self.assertNotIn('PUSH,WAIT', self.sent[before:])
+        self.assertEqual(self.window.machine.snapshot().state, 'stopped')
+        self.assertIn('有物块', self.window.log_view.toPlainText())
+
+    def test_unknown_and_one_occupied_frame_reset_empty_streak(self):
+        self.arrive_for_scan()
+        for state in ('empty', 'empty', 'occupied', 'empty', 'empty', 'unknown', 'empty', 'empty'):
+            self.finish_scan(self.presence_result(state))
+        self.assertNotIn('PUSH,WAIT', self.sent)
+        self.assertEqual(self.window.machine.snapshot().state, 'stopped')
+
+    def test_empty_capture_is_explicit_and_forbidden_during_automatic_run(self):
+        self.start_round()
+        with patch.object(QMessageBox, 'question') as question:
+            self.assertFalse(self.window.capture_empty_reference())
+            question.assert_not_called()
+        self.window.stop()
+        self.window.machine.handle_mcu('STATUS,STOP')
+        yes = getattr(QMessageBox, 'Yes', None) or QMessageBox.StandardButton.Yes
+        with patch.object(QMessageBox, 'question', return_value=yes):
+            self.assertTrue(self.window.capture_empty_reference())
+        self.assertEqual(self.window._job[2], 'empty_reference')
+        from unittest.mock import Mock
+        self.window.empty_reference = Mock()
+        token = self.window._job[0]
+        self.window.machine.disconnect()
+        self.window.on_empty_reference(token, self.window.frames)
+        self.window.empty_reference.record.assert_not_called()
+
+    def test_current_epoch_empty_capture_saves_but_does_not_move_or_bind(self):
+        from unittest.mock import Mock
+        before = list(self.sent)
+        self.window.empty_reference = Mock()
+        self.window._job = (123, self.window.machine.epoch, 'empty_reference')
+        self.window.on_empty_reference(123, self.window.frames)
+        self.window.empty_reference.record.assert_called_once_with(self.window.frames, self.window.sources)
+        self.assertEqual(self.sent, before)
+        self.assertEqual(self.window.bindings, {})
+
+    def test_background_empty_conflicting_with_yolo_target_never_sorts_or_repushes(self):
+        self.arrive_for_scan()
+        self.presence_result('empty')
+        result = self.result()
+        result.diagnostics = {'captures': self.window.frames}
+        for _ in range(8):
+            self.finish_scan(result)
+        self.assertFalse(any(s.startswith('SORT,') for s in self.sent))
+        self.assertNotIn('PUSH,WAIT', self.sent)
+        self.assertEqual(self.window.machine.snapshot().state, 'stopped')
 
     def done(self, duplicate=False):
         self.port.data = b'DONE\nDONE\n' if duplicate else b'DONE\n'

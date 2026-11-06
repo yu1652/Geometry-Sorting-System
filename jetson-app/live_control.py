@@ -186,6 +186,20 @@ class LiveController:
         self._wait('wait_done')
         return self._write('SORT,{}'.format(bin_id))
 
+    def retry_empty_scan(self):
+        """Return an independently confirmed empty station to the push loop.
+
+        Existing firmware accepts PUSH,WAIT during WAIT_SORT, schedules its next
+        PUSH? and performs no gate/bin action. Wait for a real ACK/request;
+        never invent DONE or reuse the previous tray coordinate.
+        """
+        if not self.ready or not self._origin or self._state != 'recognizing':
+            return self._reject('当前没有可重新推料的识别请求')
+        self.epoch += 1
+        self._bin = None
+        self._wait('wait_repush')
+        return self._write('PUSH,WAIT')
+
     def _fault(self, reason):
         self._last_error = reason
         self._log.append('HOST ' + reason)
@@ -238,7 +252,7 @@ class LiveController:
             return self._mcu_status(fields)
         elif head == 'STATUS':
             return self._status(fields[1:])
-        elif line == 'PUSH?' and self.ready and self._origin and self._state == 'running':
+        elif line == 'PUSH?' and self.ready and self._origin and self._state in ('running', 'wait_repush'):
             self.epoch += 1
             self._wait('locating')
         elif line == 'SCAN' and self.ready and self._origin and self._state == 'wait_scan':
@@ -289,6 +303,9 @@ class LiveController:
 
     def _status(self, fields):
         self._last_rx = self._clock()
+        if fields == ['PUSH', 'WAIT'] and self.ready and self._origin and self._state == 'wait_repush':
+            self._wait('running')
+            return True
         if fields == ['HOST_READY'] and self._state == 'enabling_auto':
             self._wait('starting')
             return self._write('START')

@@ -115,6 +115,69 @@ class LiveVisionTests(unittest.TestCase):
         worker.frames_ready.connect(previews.append)
         return worker, events, captures, results, failures, previews
 
+    def test_empty_reference_settles_drains_copies_all_views_without_loading_models(self):
+        for preview_seconds in (.1, 1.0):
+            with self.subTest(preview_seconds=preview_seconds):
+                now, settled_from, references = [0.0], [], []
+                worker, _, captures, results, failures, previews = self.worker(clock=lambda: now[0])
+                worker.recognizer_factory = lambda: self.fail('empty reference must not load recognizer')
+                worker.tray_factory = lambda: self.fail('empty reference must not load tray model')
+
+                def preview(frames):
+                    now[0] += preview_seconds
+                    if len(previews) == 2:
+                        settled_from.append(now[0])
+
+                worker.frames_ready.connect(preview)
+                worker.empty_reference_ready.connect(
+                    lambda token, frames: (references.append((token, frames)), worker.shutdown()))
+                self.assertTrue(worker.capture_empty(37))
+                worker.run()
+                self.assertEqual(failures, [])
+                self.assertEqual(results, [])
+                self.assertEqual(references[0][0], 37)
+                self.assertGreaterEqual(now[0] - settled_from[0], .8)
+                self.assertTrue(all(cap.read_count >= 8 for cap in captures.values()))
+                self.assertEqual(set(references[0][1]), {'left', 'right', 'top'})
+                for role, frame in references[0][1].items():
+                    np.testing.assert_array_equal(frame, previews[-1][role])
+                    self.assertFalse(np.shares_memory(frame, previews[-1][role]))
+                    original = frame.copy()
+                    previews[-1][role].fill(0)
+                    np.testing.assert_array_equal(frame, original)
+                self.assertTrue(all(cap.close_count == 1 for cap in captures.values()))
+
+    def test_empty_reference_shutdown_during_settling_emits_no_old_reference(self):
+        now, references = [0.0], []
+        worker, _, captures, results, failures, previews = self.worker(clock=lambda: now[0])
+        worker.empty_reference_ready.connect(lambda token, frames: references.append((token, frames)))
+
+        def preview(frames):
+            now[0] += .1
+            if len(previews) == 4:
+                worker.shutdown()
+
+        worker.frames_ready.connect(preview)
+        self.assertTrue(worker.capture_empty(38))
+        worker.run()
+        self.assertEqual(references, [])
+        self.assertEqual(results, [])
+        self.assertEqual(failures, [])
+        self.assertTrue(all(cap.close_count == 1 for cap in captures.values()))
+
+    def test_empty_reference_camera_failure_during_drain_never_returns_preview(self):
+        references = []
+        worker, _, captures, results, failures, previews = self.worker(fail_at=6)
+        worker.empty_reference_ready.connect(lambda token, frames: references.append((token, frames)))
+        self.assertTrue(worker.capture_empty(39))
+        worker.run()
+        self.assertTrue(previews)
+        self.assertEqual(references, [])
+        self.assertEqual(results, [])
+        self.assertEqual(failures[0][0], -1)
+        self.assertIn('fresh frame', failures[0][1])
+        self.assertTrue(all(cap.close_count == 1 for cap in captures.values()))
+
     def test_manual_recognition_discards_frames_captured_before_lazy_model_load(self):
         worker, events, captures, results, failures, _ = self.worker()
         loaded_counts = {}

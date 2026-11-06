@@ -119,6 +119,9 @@ class RuntimeDiagnostics:
 
         def write(bundle):
             bundle.writestr('metadata.json', _json_bytes(metadata))
+            reference_bytes = diagnostics.get('empty_reference_bytes')
+            if reference_bytes is not None:
+                bundle.writestr('empty_reference.npz', reference_bytes)
             for name in ('pair_bgr', 'features_bgr'):
                 self._image(bundle, name + '.png', diagnostics.get(name))
             self._image(bundle, 'preview_bgr.png', getattr(result, 'preview_bgr', None))
@@ -142,8 +145,11 @@ class RuntimeDiagnostics:
     def _safe_extra(path):
         allowed = {'.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.csv', '.txt'}
         sensitive = re.compile(r'(secret|password|credential|token|private|api[_.-]?key|\.env)', re.I)
+        # This explicit local camera reference is part of scene diagnostics,
+        # rather than a generic allowance for arbitrary NumPy/model archives.
+        empty_scene = path.name == 'recognition_empty.npz' and path.is_file() and path.stat().st_size <= 5_000_000
         return (not path.is_symlink() and path.is_file()
-                and path.suffix.lower() in allowed and not sensitive.search(path.name))
+                and (path.suffix.lower() in allowed or empty_scene) and not sensitive.search(path.name))
 
     def export(self, extra_files=(), metadata=None):
         """Export existing logs/samples plus explicit regular config files.

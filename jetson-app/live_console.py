@@ -32,6 +32,7 @@ from motion_limits import X_MAX_MM, Y_MAX_MM, position_in_machine
 from auto_bins import AutoBinSession, CapacityFull
 from runtime_diagnostics import RuntimeDiagnostics
 from scan_gate import ScanConsensus
+from scene_presence import EmptySceneReference, PresenceResult
 from sorter_console import (CalibrationDialog, DEFAULT_POINTS, TRAY_ROI,
                             button, fit_calibration)
 
@@ -39,7 +40,7 @@ ROOT = Path(__file__).resolve().parent
 ROLES = ('left', 'right', 'top')
 CAMERA_TITLES = ('识别区俯拍 / 拼图左', '识别区侧视 / 拼图右', '托盘定位俯拍')
 COLORS = ('红色', '橙色', '黄色', '绿色', '青色', '蓝色', '紫色', '黑色', '白色', '灰色')
-AUTO_STATES = {'enabling_auto', 'starting', 'running', 'locating', 'wait_scan', 'recognizing', 'wait_done'}
+AUTO_STATES = {'enabling_auto', 'starting', 'running', 'locating', 'wait_scan', 'recognizing', 'wait_repush', 'wait_done'}
 DEFAULT_SOURCES = {
     role: '/dev/v4l/by-path/platform-3610000.xhci-usb-0:%s:1.0-video-index0' % port
     for role, port in zip(ROLES, ('2.1', '2.2', '2.4'))
@@ -83,10 +84,12 @@ class LiveWindow(QMainWindow):
         self.auto_bins_path = self.data_dir / 'live_auto_bins.json'
         self.device_path = self.data_dir / 'live_devices.json'
         self.diagnostics = RuntimeDiagnostics(self.data_dir)
+        self.empty_reference = EmptySceneReference(self.data_dir / 'recognition_empty.npz')
         self._diagnostic_log_error = False
         self._scan_gate = None
         self._scan_epoch = None
         self._scan_next_at = 0
+        self._empty_matches = 0
         self.calibration_frame = normalize_frame_settings()
         self.names = (ROOT / 'models/legacy_classes.txt').read_text(encoding='utf8').splitlines()
         self.sources = dict(DEFAULT_SOURCES)
@@ -122,6 +125,7 @@ class LiveWindow(QMainWindow):
         self.timer.start(40)
         self.write_log('实机入口已打开。先连接相机与串口，手动对零后确认。')
         self.write_log('自动识别：模型就绪后重新取图，等待至少 0.8 秒；最多复核 8 次，连续两次形状和颜色一致才投箱。')
+        self.write_log('先清空识别区并采集空区参考；双摄连续三次确认空区后才自动请求新一轮推料。')
 
     def _make_ui(self):
         root = QWidget()
@@ -183,6 +187,8 @@ class LiveWindow(QMainWindow):
         self.result_label.setWordWrap(True)
         info.addWidget(self.result_label)
         info.addWidget(button('手动识别（只显示）', self.manual_recognize))
+        self.empty_reference_button = button('采集空识别区', self.capture_empty_reference)
+        info.addWidget(self.empty_reference_button)
         info.addWidget(button('托盘定位（只显示）', self.manual_locate))
         self.calibration_confirmed = QCheckBox('九点标定已在实机逐点核对')
         info.addWidget(self.calibration_confirmed)
@@ -235,7 +241,7 @@ class LiveWindow(QMainWindow):
                 self.log_view.append('诊断日志保存失败：' + str(error))
                 self._diagnostic_log_error = True
 
-    def _save_diagnostic(self, result, token, kind):
+    def _save_diagnostic(self, result, token, kind, presence=None):
         evidence = getattr(result, 'diagnostics', None) or {}
         context = {'token': token, 'epoch': self.machine.epoch, 'kind': kind,
                    'machine_state': self.machine.snapshot().state,
@@ -244,6 +250,7 @@ class LiveWindow(QMainWindow):
                    'class_names': evidence.get('class_names', self.names),
                    'recognizer_config': evidence.get('config'),
                    'models': evidence.get('models'),
+                   'presence': presence or evidence.get('presence'),
                    'capture': evidence.get('capture'), 'sources': self.sources}
         try:
             path = self.diagnostics.save_sample(result, context)
@@ -259,6 +266,7 @@ class LiveWindow(QMainWindow):
             path = self.diagnostics.export(
                 extra_files=(ROOT / 'legacy_vision.yaml', ROOT / 'models/legacy_classes.txt',
                              self.calibration_path, self.device_path, self.auto_bins_path,
+                             self.data_dir / 'recognition_empty.npz',
                              ROOT / 'data/model_store/active.json'),
                 metadata={'application': 'YLERS live console', 'sources': self.sources,
                           'state': self.machine.snapshot().state, 'class_names': self.names})
@@ -409,6 +417,7 @@ class LiveWindow(QMainWindow):
             self.vision = self._vision_factory(self.sources, self)
             self.vision.frames_ready.connect(self.on_frames)
             self.vision.recognition_ready.connect(self.on_recognized)
+            self.vision.empty_reference_ready.connect(self.on_empty_reference)
             self.vision.location_ready.connect(self.on_located)
             self.vision.failed.connect(self.on_vision_failed)
             self.vision.notice.connect(self.write_log)
@@ -569,6 +578,8 @@ class LiveWindow(QMainWindow):
                 if not self.calibration_valid:
                     raise ValueError('请先保存九点标定。')
                 accepted = self.vision.locate(token, validate_points(self.calibration_rows), TRAY_ROI, (4, 0))
+            elif kind == 'empty_reference':
+                accepted = self.vision.capture_empty(token)
             else:
                 accepted = self.vision.recognize(token, settle=True) if kind == 'sort' else self.vision.recognize(token)
             self.write_log('视觉请求 token=%s epoch=%s kind=%s' % (token, self.machine.epoch, kind))
@@ -588,6 +599,36 @@ class LiveWindow(QMainWindow):
             return False
         return self._request('manual')
 
+    def capture_empty_reference(self):
+        if (self.machine.snapshot().state in AUTO_STATES or self.machine.pending
+                or self._job is not None or self.vision is None or self._frames_at is None
+                or self._closing or self._models_open()
+                or self.machine.connected and not self.machine.idle_confirmed):
+            self.write_log('请先停止自动流程，连接相机并等待当前动作结束，再采集空区。')
+            return False
+        answer = QMessageBox.question(self, '采集空识别区',
+            '请取走双摄识别区内所有物块和手，保持相机、光照和接料机构处于正常识别位置。\n'
+            '确认识别区确实为空后采集。托盘上可以保留待分拣物块。')
+        yes = getattr(QMessageBox, 'Yes', None)
+        if yes is None:
+            yes = QMessageBox.StandardButton.Yes
+        if answer != yes:
+            return False
+        return self._request('empty_reference')
+
+    def on_empty_reference(self, token, frames):
+        if self._take_job(token) != 'empty_reference':
+            return
+        if (self.machine.snapshot().state in AUTO_STATES or self.machine.pending or self._closing
+                or self.machine.connected and not self.machine.idle_confirmed):
+            self.write_log('设备状态已改变，本次空区参考未保存。')
+            return
+        try:
+            self.empty_reference.record(frames, self.sources)
+            self.write_log('空识别区参考已保存。确认空区三次会请求新一轮推料，不投箱、不计数。')
+        except (OSError, ValueError, TypeError, cv2.error) as error:
+            self.write_log('空区参考保存失败：' + str(error))
+
     def manual_locate(self):
         if self.machine.snapshot().state in AUTO_STATES or self.machine.pending:
             self.write_log('请先停止自动流程，再手动定位。')
@@ -603,6 +644,7 @@ class LiveWindow(QMainWindow):
                 if self._scan_epoch != self.machine.epoch:
                     self._scan_epoch = self.machine.epoch
                     self._scan_gate = ScanConsensus()
+                    self._empty_matches = 0
                     self._scan_next_at = 0
                 if time.monotonic() < self._scan_next_at:
                     return
@@ -621,7 +663,19 @@ class LiveWindow(QMainWindow):
         if kind is None:
             self._persist_log('丢弃过期识别结果 token=%s epoch=%s' % (token, self.machine.epoch))
             return
-        self._save_diagnostic(result, token, kind)
+        evidence = getattr(result, 'diagnostics', None) or {}
+        captures = evidence.get('captures')
+        presence = (self.empty_reference.assess(captures, self.sources) if captures is not None
+                    else PresenceResult('unknown', '缺少本次双摄原始帧，不能确认空区', {}))
+        conflicting_empty = presence.state == 'empty' and result.detection is not None
+        if conflicting_empty:
+            presence = PresenceResult('unknown', '空区参考与模型目标冲突，需要复核', presence.scores,
+                                      getattr(presence, 'reference_bytes', None), getattr(presence, 'reference_sha256', None))
+        evidence['presence'] = {'state': presence.state, 'reason': presence.reason, 'scores': presence.scores,
+                                'reference_sha256': getattr(presence, 'reference_sha256', None)}
+        if getattr(presence, 'reference_bytes', None) is not None:
+            evidence['empty_reference_bytes'] = presence.reference_bytes
+        self._save_diagnostic(result, token, kind, evidence['presence'])
         if result.error:
             self.write_log('视觉失败：' + str(result.error))
             if kind == 'sort':
@@ -633,6 +687,15 @@ class LiveWindow(QMainWindow):
         confidence = '%.1f%%' % (detection.confidence * 100) if detection else '—'
         self.result_label.setText('%s / %s · %s · %.1f ms\n%s' % (
             shape, color_name, confidence, result.elapsed_ms, surface_summary(result)))
+        scene_text = {'empty': '识别区为空', 'occupied': '识别区有物块', 'unknown': '识别区是否为空尚未确认'}[presence.state]
+        if detection is not None:
+            scene_text = '空区判断与目标检测冲突，等待复核' if conflicting_empty else '已检出物块'
+        if detection is None:
+            scene_text = {'empty': '识别区为空，等待连续确认',
+                          'occupied': '识别区有物块，但模型未识别到目标',
+                          'unknown': '未识别到目标，无法确认是否有物块；请先采集空区参考或导出诊断'}[presence.state]
+        self.result_label.setText(scene_text + '\n' + self.result_label.text())
+        self.write_log(scene_text + '；' + presence.reason)
         sources = {'mask': '表面掩膜', 'box': '检测框（覆膜未参与）', 'none': '未取色'}
         color_sources = getattr(result, 'color_sources', ('none', 'none'))
         self.write_log(surface_summary(result) + '；取色 左：%s / 右：%s' % tuple(
@@ -647,15 +710,24 @@ class LiveWindow(QMainWindow):
                 return
             usable = (detection is not None and color is not None and color.valid_pixels > 0
                       and np.isfinite(color.confidence) and color.confidence >= 0.35
-                      and shape in self.names and color_name in COLORS)
+                      and shape in self.names and color_name in COLORS and not conflicting_empty)
             if self._scan_gate is None or self._scan_epoch != self.machine.epoch:
                 self.write_log('缺少本件复核记录，未发送投箱指令。')
                 self.stop()
                 return
             decision = self._scan_gate.observe((shape, color_name) if usable else None)
+            self._empty_matches = self._empty_matches + 1 if presence.state == 'empty' and detection is None else 0
             self.write_log('自动复核 %s/%s：%s / %s，连续一致 %s/%s' % (
                 self._scan_gate.attempts, self._scan_gate.max_attempts, shape, color_name,
                 self._scan_gate.matches, self._scan_gate.required_matches))
+            if self._empty_matches >= 3:
+                self._last_sort = None
+                if self.machine.retry_empty_scan():
+                    self.result_label.setText('识别区无物块，等待新一轮托盘定位和推料')
+                    self.write_log('双摄连续三次确认识别区无物块，等待 ESP32 请求新一轮托盘定位和推料；不投箱、不计数。')
+                else:
+                    self.stop()
+                return
             if decision == 'retry':
                 self._scan_next_at = time.monotonic() + .25
                 return

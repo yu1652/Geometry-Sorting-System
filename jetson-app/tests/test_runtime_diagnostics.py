@@ -27,7 +27,7 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
             mask_status=('ok', 'empty'), hole_counts=(1, None), color_sources=('mask', 'none'),
             elapsed_ms=3.4, error=None, preview_bgr=image,
             diagnostics={'pair_bgr': image, 'features_bgr': image, 'raw_output': raw,
-                         'captures': {'left': image}})
+                         'captures': {'left': image}, 'empty_reference_bytes': b'exact-reference-version'})
         with tempfile.TemporaryDirectory() as folder:
             recorder = RuntimeDiagnostics(folder)
             path = recorder.save_sample(result, {'preprocessed': True, 'reason': 'empty'})
@@ -46,6 +46,7 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
                     decoded = cv2.imdecode(np.frombuffer(bundle.read(name), dtype=np.uint8), cv2.IMREAD_COLOR)
                     np.testing.assert_array_equal(decoded, original)
                 np.testing.assert_array_equal(np.load(io.BytesIO(bundle.read('raw_output.npy')), allow_pickle=False), raw)
+                self.assertEqual(bundle.read('empty_reference.npz'), b'exact-reference-version')
             np.testing.assert_array_equal(image, original)
             np.testing.assert_array_equal(raw, [[np.float32(.2), np.float32(.9)]])
             path.unlink()  # all handles must be closed on Windows
@@ -108,15 +109,21 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
             config.write_text('{"camera": 0}', encoding='utf-8')
             model = root / 'model.engine'
             model.write_bytes(b'model')
+            reference = root / 'recognition_empty.npz'
+            np.savez_compressed(reference, left=np.zeros((2, 2, 3), np.uint8))
+            weights = root / 'weights.npz'
+            weights.write_bytes(b'weights')
             secret = root / 'secrets.json'
             secret.write_text('{"password": "private"}', encoding='utf-8')
             unrequested = root / 'other.json'
             unrequested.write_text('{}', encoding='utf-8')
-            path = recorder.export((config, model, secret, root), metadata={'device': 'xavier'})
+            path = recorder.export((config, model, secret, root, reference, weights), metadata={'device': 'xavier'})
             with zipfile.ZipFile(path) as bundle:
                 self.assertIn('live_runtime.log', bundle.namelist())
                 self.assertIn('diagnostic_samples/' + sample.name, bundle.namelist())
                 self.assertEqual(bundle.read('extra_files/config.json'), config.read_bytes())
+                self.assertEqual(bundle.read('extra_files/recognition_empty.npz'), reference.read_bytes())
+                self.assertNotIn('extra_files/weights.npz', bundle.namelist())
                 self.assertEqual(json.loads(bundle.read('metadata.json')), {'device': 'xavier'})
                 self.assertFalse(any('model' in name or 'secret' in name or 'other.json' in name for name in bundle.namelist()))
             path.unlink()

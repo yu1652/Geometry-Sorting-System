@@ -75,6 +75,7 @@ class LiveVisionWorker(QThread):
     frames_ready = Signal(object)
     recognition_ready = Signal(int, object)
     location_ready = Signal(int, object)
+    empty_reference_ready = Signal(int, object)
     failed = Signal(int, str)
     notice = Signal(str)
 
@@ -123,6 +124,9 @@ class LiveVisionWorker(QThread):
 
     def locate(self, token, calibration, roi, offsets):
         return self._submit(token, ('locate', token, calibration, tuple(roi), tuple(offsets)))
+
+    def capture_empty(self, token):
+        return self._submit(token, ('empty_reference', token))
 
     def shutdown(self):
         self._stopping.set()
@@ -205,12 +209,17 @@ class LiveVisionWorker(QThread):
                     continue
                 # Initialization can leave the driver's queue full of old frames.
                 # Always drain after loading, and give automatic SCANs time to settle.
-                settle_seconds = self.scan_settle_seconds if kind == 'recognize' and request[2] else 0
+                settle_requested = (kind == 'empty_reference' or kind == 'recognize' and request[2])
+                settle_seconds = self.scan_settle_seconds if settle_requested else 0
                 frames = self._fresh_frames(settle_seconds)
                 if frames is None:
                     break
                 try:
-                    if kind == 'recognize':
+                    if kind == 'empty_reference':
+                        reference = {role: frame.copy() for role, frame in frames.items()}
+                        if not self._stopping.is_set():
+                            self.empty_reference_ready.emit(token, reference)
+                    elif kind == 'recognize':
                         capture_completed = self._clock()
                         captures = {role: frame.copy() for role, frame in frames.items()}
                         result = recognizer.recognize_pair(frames['left'], frames['right'])

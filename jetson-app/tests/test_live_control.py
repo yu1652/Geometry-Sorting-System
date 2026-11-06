@@ -156,6 +156,42 @@ class LiveControllerTests(unittest.TestCase):
         self.control.handle_mcu('PUSH?')
         self.assertGreater(self.control.epoch, epoch)
 
+    def test_confirmed_empty_station_requests_next_push_without_done_or_sort(self):
+        self.start_running()
+        before = list(self.sent)
+        self.assertFalse(self.control.retry_empty_scan())
+        self.assertEqual(self.sent, before)
+        self.control.handle_mcu('PUSH?')
+        self.control.provide_target(100, 50)
+        self.control.handle_mcu('SCAN')
+        epoch = self.control.epoch
+        self.assertTrue(self.control.retry_empty_scan())
+        self.assertEqual(self.sent[-1], 'PUSH,WAIT')
+        self.assertEqual(self.control.snapshot().state, 'wait_repush')
+        self.assertGreater(self.control.epoch, epoch)
+        self.assertFalse(self.control.provide_sort(1))
+        self.assertFalse(self.control.handle_mcu('DONE'))
+        self.assertTrue(self.control.handle_mcu('STATUS,PUSH,WAIT'))
+        self.assertEqual(self.control.snapshot().state, 'running')
+        self.assertTrue(self.control.handle_mcu('PUSH?'))
+        self.assertEqual(self.control.snapshot().state, 'locating')
+        self.assertEqual(self.control.snapshot().completed_count, 0)
+        self.assertTrue(self.control.snapshot().origin_confirmed)
+
+    def test_empty_retry_can_use_real_next_push_as_ack_but_stop_never_resumes(self):
+        self.start_running()
+        self.control.handle_mcu('PUSH?')
+        self.control.provide_target(100, 50)
+        self.control.handle_mcu('SCAN')
+        self.assertTrue(self.control.retry_empty_scan())
+        self.assertTrue(self.control.handle_mcu('PUSH?'))
+        self.assertEqual(self.control.snapshot().state, 'locating')
+        self.control.stop()
+        self.assertFalse(self.control.handle_mcu('STATUS,PUSH,WAIT'))
+        self.assertFalse(self.control.handle_mcu('PUSH?'))
+        self.assertFalse(self.control.retry_empty_scan())
+        self.assertEqual(self.control.snapshot().state, 'stopped')
+
     def test_stop_reboot_error_and_disconnect_invalidate_origin_and_jobs(self):
         self.start_running()
         self.control.handle_mcu('PUSH?')
