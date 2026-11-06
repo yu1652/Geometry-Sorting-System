@@ -11,7 +11,7 @@ import numpy as np
 
 from vision import (
     ColorResult, Detection, LetterboxTransform, classify_hsv, decode_yolo_raw,
-    letterbox_rgb, restore_surface_mask,
+    letterbox_rgb, restore_surface_mask, tighten_box,
 )
 
 
@@ -62,6 +62,9 @@ class LegacyResult:
     preview_bgr: np.ndarray
     elapsed_ms: float
     error: Optional[str] = None
+    surface_boxes: tuple = (None, None)
+    hole_counts: tuple = (None, None)
+    color_sources: tuple = ('none', 'none')
 
 
 class LegacyRecognizer:
@@ -116,18 +119,37 @@ class LegacyRecognizer:
 
         statuses = []
         colors = []
+        surface_boxes, hole_counts, color_sources = [], [], []
         full_roi = np.ones((320, 320), dtype=bool)
+        mask_mode = self._config.get('surface_mask', {}).get('input_mode', 'legacy_features')
         for side, candidates in enumerate(sides):
             offset = side * 320
             half = stitched[:, offset:offset + 320]
             target = preview[:, offset:offset + 320]
-            if preprocessed:
-                statuses.append('feature_input' if candidates else 'no_detection')
-                continue
-            if candidates:
-                detection, box = candidates[0]
-                colors.append((classify_hsv(half, full_roi, box, self._config), detection.confidence))
-            statuses.append(self._overlay(half, target, candidates))
+            # Feature halves are the exact RGB tensors used in training. Slice
+            # the already prepared stitch, avoiding a second CLAHE/Canny pass.
+            mask_tensor = tensor[:, :, 160:480, offset:offset + 320].copy()
+            if mask_mode == 'raw_rgb' and not preprocessed:
+                mask_tensor, _ = letterbox_rgb(half, 320)
+            if mask_mode not in ('raw_rgb', 'legacy_features') or mask_mode == 'raw_rgb' and preprocessed:
+                mask, status = None, 'input_mismatch'
+            else:
+                mask, status = self._surface(mask_tensor, candidates)
+            statuses.append(status)
+            box = candidates[0][1] if candidates else None
+            surface_box = tighten_box(box, mask) if mask is not None else None
+            surface_boxes.append(surface_box)
+            hole_counts.append(count_inner_holes(mask) if mask is not None else None)
+            if mask is not None:
+                pixels = target[mask].astype(np.float32)
+                target[mask] = np.rint(pixels * .65 + np.array((0, 255, 0)) * .35).astype(np.uint8)
+            source = 'none'
+            if candidates and not preprocessed:
+                detection = candidates[0][0]
+                source = 'mask' if mask is not None else 'box'
+                colors.append((classify_hsv(half, mask if mask is not None else full_roi,
+                                            surface_box or box, self._config), detection.confidence))
+            color_sources.append(source)
 
         color = None
         if colors:
@@ -136,6 +158,11 @@ class LegacyRecognizer:
             )
             color, _ = max(colors, key=lambda item: (item[0].name != unknown, item[0].confidence, item[1]))
 
+        for side, surface_box in enumerate(surface_boxes):
+            if surface_box is not None:
+                x1, y1, x2, y2 = surface_box
+                cv2.rectangle(preview, (floor(x1) + side * 320, floor(y1)),
+                              (ceil(x2) - 1 + side * 320, ceil(y2) - 1), (255, 220, 0), 1)
         for detection in detections:
             x1, y1, x2, y2 = detection.box
             cv2.rectangle(
@@ -147,29 +174,40 @@ class LegacyRecognizer:
             (statuses[0], statuses[1]),
             preview,
             (time.perf_counter() - started) * 1000,
+            surface_boxes=tuple(surface_boxes), hole_counts=tuple(hole_counts),
+            color_sources=tuple(color_sources),
         )
 
-    def _overlay(self, half, preview, candidates):
+    def _surface(self, tensor, candidates):
         if not candidates:
-            return "no_detection"
+            return None, "no_detection"
         if self._segmenter is None:
-            return "disabled"
+            return None, self._config.get('surface_mask', {}).get('unavailable_status', 'disabled')
         if len(candidates) != 1:
-            return "ambiguous"
+            return None, "ambiguous"
         try:
-            tensor, transform = letterbox_rgb(half, 320)
+            # Every mask slot consumes an unpadded 320x320 half-image.
+            transform = LetterboxTransform(320, 320, 320, 1, 0, 0, 320, 320)
             mask = restore_surface_mask(self._segmenter.infer(tensor), transform, threshold=0.5)
         except Exception:
-            return "error"
+            return None, "error"
         if not mask.any():
-            return "empty"
+            return None, "empty"
+        if mask.mean() > .9:
+            return None, "overfull"
         x1, y1, x2, y2 = candidates[0][1]
-        if not mask[floor(y1):ceil(y2), floor(x1):ceil(x2)].any():
-            return "unmatched"
-
-        pixels = preview[mask].astype(np.float32)
-        preview[mask] = np.rint(pixels * 0.65 + np.array((0, 255, 0)) * 0.35).astype(np.uint8)
-        return "applied"
+        # Select the connected foreground with the largest overlap with the
+        # target, then clip to its detector box. No hole-filling is performed.
+        count, labels = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+        overlap = labels[floor(y1):ceil(y2), floor(x1):ceil(x2)]
+        areas = np.bincount(overlap.ravel(), minlength=count)
+        areas[0] = 0
+        if not areas.any():
+            return None, "unmatched"
+        component = labels == int(areas.argmax())
+        selected = np.zeros_like(mask)
+        selected[floor(y1):ceil(y2), floor(x1):ceil(x2)] = component[floor(y1):ceil(y2), floor(x1):ceil(x2)]
+        return selected, "applied"
 
     def close(self):
         self._check_thread()
@@ -181,3 +219,29 @@ class LegacyRecognizer:
         finally:
             if self._segmenter is not None and self._segmenter is not self._detector:
                 self._segmenter.close()
+
+
+def count_inner_holes(mask):
+    """Visible enclosed background regions; diagnostic, not a class decision."""
+    contours, hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return 0
+    minimum_area = max(8, int(mask.sum()) * .005)
+    return sum(1 for contour, relation in zip(contours, hierarchy[0])
+               if relation[3] >= 0 and cv2.contourArea(contour) >= minimum_area)
+
+
+def surface_summary(result):
+    names = {'applied': '已参与', 'no_detection': '无YOLO目标', 'disabled': '未开启',
+             'missing_model': '模型缺失', 'ambiguous': '多目标未关联', 'empty': '空掩膜',
+             'unmatched': '未匹配目标', 'error': '推理失败', 'overfull': '覆盖异常',
+             'input_mismatch': '输入不匹配', 'feature_input': '仅特征输入'}
+    statuses = getattr(result, 'mask_status', ('unknown', 'unknown'))
+    holes = getattr(result, 'hole_counts', (None, None))
+    parts = []
+    for side, status, count in zip(('左', '右'), statuses, holes):
+        text = '%s覆膜：%s' % (side, names.get(status, status))
+        if count is not None:
+            text += ' / 孔候选%d' % count
+        parts.append(text)
+    return '；'.join(parts)

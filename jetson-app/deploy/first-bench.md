@@ -14,9 +14,9 @@ bash deploy/build_models.sh
 bash run_jetson.sh
 ```
 
-本地部署包包含项目提供的 `SHAPE.onnx`、`tray_object_detector.onnx`、`surface_mask.onnx` 和校验值。形状模型可在离线界面用原始双摄拼接图点「手动识别」。用俯拍样本检查顶部模型，现场检查表面掩膜能否保留环件通孔后，再在模型管理中启用。引擎脚本保留已有非空 Engine。切换 ONNX 或设备环境时，在新目录构建对应 Engine。
+本地部署包包含项目提供的 `SHAPE.onnx`、`tray_object_detector.onnx`、`surface_mask.onnx` 和校验值。形状模型可在离线界面用原始双摄拼接图点「手动识别」。现有表面 Engine 存在时默认加载，输入使用其训练时的特征半图，现场先用只识别功能检查覆膜位置、颜色和环件通孔。新的模型发布包仍通过模型管理试跑、确认和回退。引擎脚本保留已有非空 Engine。切换 ONNX 或设备环境时，在新目录构建对应 Engine。
 
-现有训练数据是已处理的双摄特征拼图。验证此类样本时，在顶部选择「已处理特征拼图」，打开 `640×320` 图片后点击「手动识别」。该入口仅补边、转换通道顺序和归一化，不再灰度化、CLAHE 或提边。也可用 `bash run_jetson.sh --preprocessed --file /home/nvidia/000002_combined.jpg` 启动。特征图不能用于验证真实物体颜色，现有 RGB 表面掩膜也不在此入口启用。相机实拍原始帧走「原始彩色双摄图」，生成模型所需的特征通道，同时保留原始图用于颜色判断。预处理与原数据生成方法的一致性仍需在实拍时对照验收。
+现有训练数据是已处理的双摄特征拼图。验证此类样本时，在顶部选择「已处理特征拼图」，打开 `640×320` 图片后点击「手动识别」。该入口仅补边、转换通道顺序和归一化，不再灰度化、CLAHE 或提边。也可用 `bash run_jetson.sh --preprocessed --file /home/nvidia/000002_combined.jpg` 启动。特征图可验证现有特征掩膜和检测框，不能验证真实物体颜色。相机实拍原始帧走「原始彩色双摄图」，生成模型所需的特征通道，掩膜按坐标映回原彩色图取色。原彩色训练的其他掩膜发布包不能在特征输入上运行，会显示输入不匹配。预处理与原数据生成方法的一致性仍需在实拍时对照验收。
 
 `bash run_jetson.sh` 默认打开实机调试／比赛界面，包含九点标定与真实升降入口，按 [实机联调步骤](live-bench.md) 验收。`bash run_jetson.sh --offline` 打开离线模型验证界面；带 `--file`、`--raw` 或 `--preprocessed` 参数仍走离线入口。独立仿真仍可用 `.venv/bin/python sorter_console.py` 打开。
 

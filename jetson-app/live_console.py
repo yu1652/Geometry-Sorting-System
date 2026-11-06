@@ -26,6 +26,7 @@ from serial.tools import list_ports
 from esp32_serial import SerialLineTransport, SerialTransportError
 from live_control import LiveController
 from live_vision import LiveVisionWorker
+from legacy_vision import surface_summary
 from sorter_console import (CalibrationDialog, DEFAULT_POINTS, TRAY_ROI,
                             button, fit_calibration)
 
@@ -549,7 +550,13 @@ class LiveWindow(QMainWindow):
         detection, color = result.detection, result.color
         shape = detection.class_name if detection else '无目标'
         color_name = color.name if color else '未知颜色'
-        self.result_label.setText('%s / %s · %.1f ms' % (shape, color_name, result.elapsed_ms))
+        confidence = '%.1f%%' % (detection.confidence * 100) if detection else '—'
+        self.result_label.setText('%s / %s · %s · %.1f ms\n%s' % (
+            shape, color_name, confidence, result.elapsed_ms, surface_summary(result)))
+        sources = {'mask': '表面掩膜', 'box': '检测框（覆膜未参与）', 'none': '未取色'}
+        color_sources = getattr(result, 'color_sources', ('none', 'none'))
+        self.write_log(surface_summary(result) + '；取色 左：%s / 右：%s' % tuple(
+            sources.get(source, source) for source in color_sources))
         self.preview.show_frame(result.preview_bgr)
         if kind == 'sort':
             if not self._automatic_ready() or self.machine.snapshot().state != 'recognizing':

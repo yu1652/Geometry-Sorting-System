@@ -1,6 +1,9 @@
 model:
   confidence_threshold: 0.45
   iou_threshold: 0.50
+surface_mask:
+  enabled: true
+  input_mode: legacy_features
 recognition:
   unknown_color: 未知颜色
   min_color_confidence: 0.35

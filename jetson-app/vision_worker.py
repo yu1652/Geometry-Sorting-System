@@ -16,13 +16,23 @@ def load_model_set(releases):
     from legacy_vision import LegacyRecognizer
     from trt_backend import create_backend
     config = yaml.safe_load((ROOT / "legacy_vision.yaml").read_text(encoding="utf8"))
+    surface = config.setdefault('surface_mask', {})
     names = (ROOT / "models/legacy_classes.txt").read_text(encoding="utf8").splitlines()
     detector = segmenter = None
     try:
         detector_path = releases["side_detector"].engine_path if "side_detector" in releases else ROOT / "models/shape_legacy_fp16.engine"
         detector = create_backend(detector_path, model_kind="yolo_legacy")
         if "surface_mask" in releases:
-            segmenter = create_backend(releases["surface_mask"].engine_path, model_kind="mask")
+            release = releases['surface_mask']
+            modes = {'surface_rgb320_v1': 'raw_rgb', 'surface_features320_v1': 'legacy_features'}
+            surface['input_mode'] = modes[release.manifest['preprocess']]
+            segmenter = create_backend(release.engine_path, model_kind="mask")
+        elif surface.get('enabled', True):
+            mask_path = ROOT / 'models/surface_mask_fp16.engine'
+            if mask_path.is_file():
+                segmenter = create_backend(mask_path, model_kind='mask')
+            else:
+                surface['unavailable_status'] = 'missing_model'
         return LegacyRecognizer(detector, segmenter, names, config)
     except Exception:
         for resource in (segmenter, detector):

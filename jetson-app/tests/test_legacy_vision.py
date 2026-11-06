@@ -154,7 +154,8 @@ class LegacyRecognizerTests(unittest.TestCase):
         self.assertEqual(len(self.detector.inputs), 1)
         self.assertEqual(self.detector.inputs[0].shape, (1, 3, 640, 640))
         self.assertEqual(self.segmenter.inputs[1].shape, (1, 3, 320, 320))
-        np.testing.assert_allclose(self.segmenter.inputs[1][0, :, 120, 120], (80 / 255, 0, 100 / 255))
+        # The supplied mask was trained on feature half-images, not raw RGB.
+        np.testing.assert_allclose(self.segmenter.inputs[1], self.detector.inputs[0][:, :, 160:480, 320:640])
         self.assertGreaterEqual(result.elapsed_ms, 0)
 
     def test_no_detection_skips_masks_and_returns_an_unmarked_preview(self):
@@ -166,17 +167,71 @@ class LegacyRecognizerTests(unittest.TestCase):
         self.assertEqual(result.mask_status, ("no_detection", "no_detection"))
         np.testing.assert_array_equal(result.preview_bgr, np.hstack((self.left, self.right)))
 
-    def test_feature_image_detects_shape_without_inventing_color_or_using_rgb_mask(self):
+    def test_feature_image_runs_feature_mask_without_inventing_color(self):
         from unittest.mock import patch
-        recognizer = self.make_recognizer(_raw(self.left_box, self.right_box), self.ring)
+        recognizer = self.make_recognizer(_raw(self.left_box, self.right_box), self.empty, self.ring)
         with patch('legacy_vision.classify_hsv', side_effect=AssertionError('false feature color')):
             result = recognizer.recognize_pair(self.left, self.right, preprocessed=True)
         self.assertIsNone(result.error)
         self.assertEqual(result.detection.class_id, 25)
         self.assertIsNone(result.color)
-        self.assertEqual(result.mask_status, ('feature_input', 'feature_input'))
-        self.assertEqual(len(self.segmenter.inputs), 0)
+        self.assertEqual(result.mask_status, ('empty', 'applied'))
+        self.assertEqual(len(self.segmenter.inputs), 2)
+        np.testing.assert_allclose(self.segmenter.inputs[1][0, :, 200, 60] * 255, (80, 0, 100))
         np.testing.assert_allclose(self.detector.inputs[0][0, :, 200, 60] * 255, (0, 0, 100))
+
+    def test_mask_tightens_box_and_excludes_background_and_hole_from_color(self):
+        # Purple background fills most of the detection; only the ring is blue.
+        self.left[:] = (100, 0, 80)
+        mask = np.full((1, 1, 320, 320), -5, dtype=np.float32)
+        mask[0, 0, 90:150, 60:120] = 5
+        mask[0, 0, 105:135, 75:105] = -5
+        foreground = mask[0, 0] > 0
+        self.left[foreground] = (100, 0, 0)
+        result = self.make_recognizer(_raw(self.left_box), mask).recognize_pair(self.left, self.right)
+        self.assertEqual(result.color.name, '蓝色')
+        self.assertEqual(result.color.valid_pixels, 2700)
+        self.assertEqual(result.color_sources, ('mask', 'none'))
+        self.assertEqual(result.surface_boxes[0], (60, 90, 120, 150))
+        self.assertEqual(result.hole_counts, (1, None))
+        # A binary surface model supplies geometry, never a replacement class.
+        self.assertEqual(result.detection.class_id, self.left_box[1])
+
+    def test_mask_uses_only_the_component_associated_with_the_detection(self):
+        mask = np.full((1, 1, 320, 320), -5, dtype=np.float32)
+        mask[0, 0, 90:150, 60:120] = 5
+        mask[0, 0, 200:300, 200:300] = 5
+        result = self.make_recognizer(_raw(self.left_box), mask).recognize_pair(self.left, self.right)
+        np.testing.assert_array_equal(result.preview_bgr[250, 250], self.left[250, 250])
+        self.assertEqual(result.surface_boxes[0], (60, 90, 120, 150))
+
+    def test_explicit_raw_rgb_mask_release_keeps_its_own_input_contract(self):
+        self.config['surface_mask'] = {'input_mode': 'raw_rgb'}
+        recognizer = self.make_recognizer(_raw(self.right_box), self.ring)
+        recognizer.recognize_pair(self.left, self.right)
+        np.testing.assert_allclose(self.segmenter.inputs[0][0, :, 120, 120], (80 / 255, 0, 100 / 255))
+
+    def test_failed_mask_has_visible_fallback_color_source(self):
+        result = self.make_recognizer(_raw(self.left_box), RuntimeError('bad mask')).recognize_pair(self.left, self.right)
+        self.assertEqual(result.mask_status, ('error', 'no_detection'))
+        self.assertEqual(result.color_sources, ('box', 'none'))
+        self.assertEqual(result.hole_counts, (None, None))
+
+    def test_unknown_mask_input_and_incompatible_feature_image_do_not_run_mask(self):
+        for mode in ('unknown', 'raw_rgb'):
+            with self.subTest(mode=mode):
+                self.config['surface_mask'] = {'input_mode': mode}
+                recognizer = self.make_recognizer(_raw(self.left_box), self.ring)
+                result = recognizer.recognize_pair(self.left, self.right, preprocessed=True)
+                self.assertEqual(result.mask_status[0], 'input_mismatch')
+                self.assertEqual(len(self.segmenter.inputs), 0)
+
+    def test_overfull_mask_is_rejected_instead_of_coloring_background(self):
+        full = np.ones((1, 1, 320, 320), dtype=np.float32) * 5
+        result = self.make_recognizer(_raw(self.left_box), full).recognize_pair(self.left, self.right)
+        self.assertEqual(result.mask_status[0], 'overfull')
+        self.assertEqual(result.color_sources[0], 'box')
+        self.assertIsNone(result.hole_counts[0])
 
     def test_multiple_left_candidates_skip_only_the_left_overlay(self):
         extra_left = ((160, 80, 200, 160), 4, 0.6)

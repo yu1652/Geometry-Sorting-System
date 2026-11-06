@@ -340,6 +340,7 @@ class Window(QMainWindow):
         self.color_label = QLabel('颜色：—　置信度：—')
         fields.addWidget(self.color_label)
         self.mask_status_label = QLabel('左覆膜：未就绪　右覆膜：未就绪')
+        self.mask_status_label.setWordWrap(True)
         fields.addWidget(self.mask_status_label)
         self.preview_view = ImageView('识别预览将在此显示')
         fields.addWidget(self.preview_view)
@@ -536,7 +537,8 @@ class Window(QMainWindow):
         self.color_label.setText('颜色：%s　置信度：%s' % (color.name, '%.1f%%' % (color.confidence * 100)) if color else '颜色：未知　置信度：—')
         if self.input_mode.currentIndex() == 1:
             self.color_label.setText('颜色：特征拼图无法验证原始颜色')
-        self.mask_status_label.setText('左覆膜：%s　右覆膜：%s' % tuple(result.mask_status))
+        from legacy_vision import surface_summary
+        self.mask_status_label.setText(surface_summary(result))
         self.preview_view.show_frame(result.preview_bgr)
         self.status_label.setText('识别完成 · %.1f ms' % result.elapsed_ms)
 

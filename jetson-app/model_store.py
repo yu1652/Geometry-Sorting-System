@@ -52,7 +52,9 @@ class ModelStore:
             raise ValueError("manifest is missing required fields")
         if manifest["schema"] != 1 or manifest["slot"] != slot or not manifest["version"]:
             raise ValueError("manifest schema, slot or version is invalid")
-        if manifest["preprocess"] != self.PREPROCESS[slot]:
+        allowed = ((self.PREPROCESS[slot], 'surface_features320_v1') if slot == 'surface_mask'
+                   else (self.PREPROCESS[slot],))
+        if manifest["preprocess"] not in allowed:
             raise ValueError("preprocessing is incompatible with this slot")
         expected_shapes = (([1, 3, 640, 640], [1, 30, 8400]) if slot == "side_detector"
                            else ([1, 3, 320, 320], [1, 1, 320, 320]))
@@ -80,7 +82,9 @@ class ModelStore:
         self.releases.mkdir(parents=True, exist_ok=True)
         target = self.releases / (release.slot + "-" + release.version + "-" + release.manifest["sha256"].lower())
         if target.exists():
-            self.validate_manifest(target / "manifest.json", release.slot)
+            installed = self.validate_manifest(target / "manifest.json", release.slot)
+            if installed.manifest != release.manifest:
+                raise ValueError('同版本模型包已存在，但元数据不同；请使用新的版本号')
             return target / "manifest.json"
         target.mkdir()
         try:

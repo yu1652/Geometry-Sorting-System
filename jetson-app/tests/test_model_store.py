@@ -23,6 +23,24 @@ class ModelStoreTests(unittest.TestCase):
    with self.assertRaises(ValueError): store.validate_manifest(m,'side_detector')
    data=json.loads(m.read_text()); data['engine']='../outside.engine'; m.write_text(json.dumps(data))
    with self.assertRaises(ValueError): store.validate_manifest(m,'side_detector')
+ def test_feature_mask_contract_is_supported_and_unknown_contract_is_rejected(self):
+  with tempfile.TemporaryDirectory() as d:
+   store=ModelStore(d); m=self.package(d,slot='surface_mask')
+   data=json.loads(m.read_text()); data['preprocess']='surface_features320_v1'; m.write_text(json.dumps(data))
+   self.assertEqual(store.validate_manifest(m,'surface_mask').manifest['preprocess'],'surface_features320_v1')
+   data['preprocess']='unknown'; m.write_text(json.dumps(data))
+   with self.assertRaises(ValueError): store.validate_manifest(m,'surface_mask')
+ def test_same_model_version_cannot_silently_keep_conflicting_input_metadata(self):
+  with tempfile.TemporaryDirectory() as d:
+   store=ModelStore(Path(d)/'store'); store.commit_active({},{}); before=store.active_path.read_bytes()
+   source=self.package(d,slot='surface_mask')
+   installed=store.install(store.validate_manifest(source,'surface_mask'))
+   self.assertEqual(store.install(store.validate_manifest(source,'surface_mask')),installed)
+   data=json.loads(source.read_text()); data['preprocess']='surface_features320_v1'; source.write_text(json.dumps(data))
+   with self.assertRaisesRegex(ValueError,'新的版本号'):
+    store.install(store.validate_manifest(source,'surface_mask'))
+   self.assertEqual(store.validate_manifest(installed,'surface_mask').manifest['preprocess'],'surface_rgb320_v1')
+   self.assertEqual(store.active_path.read_bytes(),before)
  def test_commit_and_rollback_pointer_are_restartable(self):
   with tempfile.TemporaryDirectory() as d:
    store=ModelStore(d); store.commit_active({'surface_mask':{'version':'m1'}},{})

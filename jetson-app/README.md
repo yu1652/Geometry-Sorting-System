@@ -101,7 +101,7 @@ $env:QT_QPA_PLATFORM='offscreen'
 ..\.venv\qt5test\Scripts\python.exe -B -m unittest discover -s tests -p test_legacy_gui.py -v
 ```
 
-目标板按前述系统依赖创建 system-site-packages 虚拟环境，并在本机执行 `trtexec` 构建 Engine；用 `sha256sum` 记录 Engine 和输入 ONNX 的散列。启动应用后从模型管理选择候选，使用已保存双图试跑并检查识别预览，再显式确认启用。验证独立换掩膜时侧视版本不变；分别试跑成功、失败及回退，并重启核对 `data/model_store/active.json` 的版本。记录 TensorRT、CUDA、JetPack、Engine hash、每个实物的正确/错误/无结果和耗时。手工重点检查类别 ID/中文名、跨中线框、覆膜左右偏移、环件内孔、边界和空场。板端与真实样本验收尚待设备访问；在验收完成前保持覆膜默认关闭且不连接机械输出。
+目标板按前述系统依赖创建 system-site-packages 虚拟环境，并在本机执行 `trtexec` 构建 Engine；用 `sha256sum` 记录 Engine 和输入 ONNX 的散列。提供的表面模型使用处理后的特征半图训练；本地 `surface_mask_fp16.engine` 存在时默认加载，模型管理中的发布包则按其预处理声明选择输入。有效掩膜参与颜色取样、目标框收紧和内孔候选检查，形状类别仍来自 YOLO；孔候选不直接改写类别。识别界面分别显示左右覆膜状态，失败时明确标记检测框取色。新模型仍需用同一批实拍进行有／无覆膜对比，重点核对环件通孔、颜色和背景溢出，再验收自动分拣。换模通过模型管理试跑并显式确认启用，失败保留旧版本；详细契约见 `models/README.md`。
 
 ## 无硬件仿真台
 

@@ -98,6 +98,20 @@ class LiveConsoleTests(unittest.TestCase):
         window.on_recognized(2, result)
         self.assertEqual(window.result_label.text(), '新状态')
 
+    def test_surface_participation_and_hole_candidates_are_visible(self):
+        from legacy_vision import LegacyResult
+        result = LegacyResult(
+            detection=SimpleNamespace(class_name='wu_leng_huan_zhu', confidence=.8),
+            color=SimpleNamespace(name='蓝色', confidence=.9, valid_pixels=1000),
+            mask_status=('applied', 'empty'), preview_bgr=np.zeros((320, 640, 3), np.uint8),
+            elapsed_ms=200, hole_counts=(1, None), color_sources=('mask', 'box'))
+        self.window._job = (1, self.window.machine.epoch, 'manual')
+        self.window.on_recognized(1, result)
+        self.assertIn('左覆膜：已参与', self.window.result_label.text())
+        self.assertIn('孔候选1', self.window.result_label.text())
+        self.assertIn('右覆膜：空掩膜', self.window.result_label.text())
+        self.assertEqual(self.window.records.rowCount(), 0)
+
     def test_binding_validation_rejects_duplicate_and_unknown_class_before_write(self):
         window = self.window
         rows = [{'shape': 'yuan_zhu', 'color': '蓝色', 'bin': 1}]

@@ -32,7 +32,7 @@ class LegacyGuiTests(unittest.TestCase):
    p=Path(d)/'pair.png'; cv2.imwrite(str(p),frame); self.assertTrue(w.load_file(p)); original=w.frame.copy()
    w.recognize(); w.recognize(); self.assertTrue(self.wait(lambda:w.result_label.text()=='圆环')); self.assertEqual(len(fake.calls),1)
    np.testing.assert_array_equal(fake.calls[0][0],original[:,:320]); np.testing.assert_array_equal(fake.calls[0][1],original[:,320:])
-   self.assertIn('applied',w.mask_status_label.text()); np.testing.assert_array_equal(w.frame,original)
+   self.assertIn('已参与',w.mask_status_label.text()); np.testing.assert_array_equal(w.frame,original)
    w.save(); saved=cv2.imdecode(np.fromfile(w.last_saved/'source.png',dtype=np.uint8),1); np.testing.assert_array_equal(saved,original)
   self.tearDownWindow(w); self.assertEqual(fake.infer_thread_id,fake.close_thread_id)
  def test_stale_completion_discarded_after_source_change(self):
