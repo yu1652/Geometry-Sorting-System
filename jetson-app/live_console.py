@@ -346,6 +346,7 @@ class LiveWindow(QMainWindow):
             self.vision.recognition_ready.connect(self.on_recognized)
             self.vision.location_ready.connect(self.on_located)
             self.vision.failed.connect(self.on_vision_failed)
+            self.vision.notice.connect(self.write_log)
             self.vision.finished.connect(self._vision_finished)
             self.vision.start()
             self.camera_button.setText('断开相机')
@@ -585,7 +586,7 @@ class LiveWindow(QMainWindow):
             return
         self._job = None
         self.write_log('视觉失败：' + str(message))
-        if token == -1 or (job and job[2] in ('locate', 'sort')):
+        if self.machine.connected and (token == -1 or (job and job[2] in ('locate', 'sort'))):
             self.stop()
 
     def record_completion(self):

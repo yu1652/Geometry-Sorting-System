@@ -16,7 +16,7 @@ from tray_locator import TrayDetector, TrayLocator
 ROOT = Path(__file__).resolve().parent
 
 
-def open_live_capture(path):
+def open_live_capture(path, report=None):
     """Request a bounded-bandwidth format from the Linux V4L2 driver."""
     capture = cv2.VideoCapture(path, cv2.CAP_V4L2)
     try:
@@ -27,18 +27,30 @@ def open_live_capture(path):
             (cv2.CAP_PROP_FOURCC, mjpg),
             (cv2.CAP_PROP_FRAME_WIDTH, 640),
             (cv2.CAP_PROP_FRAME_HEIGHT, 480),
-            (cv2.CAP_PROP_FPS, 15),
         )
         for property_id, value in settings:
             if not capture.set(property_id, value):
                 raise CameraError('Camera rejected setting {}={} on {}'.format(property_id, value, path))
+        # Frame-rate controls are optional on UVC cameras. MJPG and actual
+        # frame dimensions remain mandatory, even when the FPS hint is ignored.
+        try:
+            capture.set(cv2.CAP_PROP_FPS, 15)
+        except cv2.error:
+            pass
         if round(capture.get(cv2.CAP_PROP_FOURCC)) != mjpg:
             raise CameraError('Camera did not negotiate MJPG: ' + str(path))
-        actual_fps = capture.get(cv2.CAP_PROP_FPS)
-        if not np.isfinite(actual_fps) or not 0 < actual_fps <= 15.1:
-            raise CameraError('Camera did not negotiate at most 15 FPS: ' + str(path))
+        try:
+            actual_fps = capture.get(cv2.CAP_PROP_FPS)
+        except cv2.error:
+            actual_fps = float('nan')
+        fps_text = format(actual_fps, 'g') if np.isfinite(actual_fps) and actual_fps > 0 else '未知'
+        if report is not None:
+            report('相机 %s：MJPG 640×480，驱动报告 %s FPS（请求 15 FPS）' % (path, fps_text))
         # This driver hint is optional. Jobs also discard a buffered frame.
-        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        try:
+            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except cv2.error:
+            pass
         return capture
     except Exception:
         capture.release()
@@ -62,6 +74,7 @@ class LiveVisionWorker(QThread):
     recognition_ready = Signal(int, object)
     location_ready = Signal(int, object)
     failed = Signal(int, str)
+    notice = Signal(str)
 
     def __init__(self, sources, parent=None, capture_factory=None,
                  recognizer_factory=default_recognizer_factory, tray_factory=None):
@@ -73,7 +86,8 @@ class LiveVisionWorker(QThread):
             raise ValueError('Camera roles must use three distinct devices')
         self.recognizer_factory = recognizer_factory or default_recognizer_factory
         self.tray_factory = tray_factory or _default_tray_factory
-        self._cameras = CameraService(self.sources, capture_factory or open_live_capture)
+        factory = capture_factory or (lambda path: open_live_capture(path, self.notice.emit))
+        self._cameras = CameraService(self.sources, factory)
         self._requests = Queue(maxsize=1)
         self._stopping = Event()
 

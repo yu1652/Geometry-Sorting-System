@@ -1,9 +1,12 @@
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
-from live_vision import LiveVisionWorker
+from live_vision import LiveVisionWorker, open_live_capture
+from camera_service import CameraError
+import cv2
 
 
 SOURCES = {role: '/dev/v4l/by-path/' + role for role in ('left', 'right', 'top')}
@@ -57,6 +60,42 @@ class Calibration:
 
 
 class LiveVisionTests(unittest.TestCase):
+    def test_camera_fps_request_is_optional_when_driver_keeps_30_fps(self):
+        capture = MagicMock()
+        capture.isOpened.return_value = True
+        capture.set.side_effect = lambda prop, value: prop != cv2.CAP_PROP_FPS
+        mjpg = cv2.VideoWriter_fourcc(*'MJPG')
+        capture.get.side_effect = lambda prop: mjpg if prop == cv2.CAP_PROP_FOURCC else 30.0
+        notices = []
+        with patch('live_vision.cv2.VideoCapture', return_value=capture):
+            result = open_live_capture('/dev/v4l/by-path/top', notices.append)
+        self.assertIs(result, capture)
+        capture.release.assert_not_called()
+        self.assertTrue(any('30' in line for line in notices))
+
+    def test_unreported_fps_does_not_reject_valid_mjpg_capture(self):
+        for fps in (0.0, float('nan')):
+            with self.subTest(fps=fps):
+                capture = MagicMock()
+                capture.isOpened.return_value = True
+                capture.set.return_value = True
+                mjpg = cv2.VideoWriter_fourcc(*'MJPG')
+                capture.get.side_effect = lambda prop: mjpg if prop == cv2.CAP_PROP_FOURCC else fps
+                notices = []
+                with patch('live_vision.cv2.VideoCapture', return_value=capture):
+                    self.assertIs(open_live_capture('/dev/v4l/by-path/top', notices.append), capture)
+                self.assertTrue(any('未知' in line for line in notices))
+
+    def test_non_mjpg_capture_is_still_rejected_and_released(self):
+        capture = MagicMock()
+        capture.isOpened.return_value = True
+        capture.set.return_value = True
+        capture.get.return_value = cv2.VideoWriter_fourcc(*'YUYV')
+        with patch('live_vision.cv2.VideoCapture', return_value=capture):
+            with self.assertRaisesRegex(CameraError, 'MJPG'):
+                open_live_capture('/dev/v4l/by-path/top')
+        capture.release.assert_called_once()
+
     def worker(self, *, shape=(480, 640, 3), fail_at=None, recognizer_factory=None, tray_factory=None):
         events, captures = [], {}
 
