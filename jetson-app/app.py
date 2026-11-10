@@ -263,10 +263,14 @@ class ModelDialog(QDialog):
 
 class Window(QMainWindow):
 
-    def __init__(self, recognizer_factory=None, *, linux_20261107=False):
+    def __init__(self, recognizer_factory=None, *, linux_20261107=False, butu_24=False):
         super().__init__()
-        self.linux_20261107 = linux_20261107
-        self.setWindowTitle('YLERS · Jetson Xavier NX 视觉操作台 — 离线版')
+        self.butu_24 = butu_24
+        self.linux_20261107 = linux_20261107 or butu_24
+        if butu_24 and recognizer_factory is None:
+            from butu_20261110 import make_recognizer
+            recognizer_factory = make_recognizer
+        self.setWindowTitle('YLERS · Jetson Xavier NX 视觉操作台 — 离线版' + (' · 补图 24 类' if butu_24 else ''))
         self.resize(1024, 600)
         self.setMinimumSize(1024, 600)
         self.source = MediaSource()
@@ -533,7 +537,13 @@ class Window(QMainWindow):
             self.status_label.setText(result.error)
             return
         detection = result.detection
-        self.result_label.setText('无目标' if detection is None else str(getattr(detection, 'shape', getattr(detection, 'class_name', '类别 %s' % detection.class_id))))
+        name = '无目标'
+        if detection is not None:
+            name = str(getattr(detection, 'shape', getattr(detection, 'class_name', '类别 %s' % detection.class_id)))
+            if self.butu_24:
+                from butu_20261110 import SHAPES
+                name = SHAPES.get(name, name)
+        self.result_label.setText(name)
         color = result.color
         self.color_label.setText('颜色：%s　置信度：%s' % (color.name, '%.1f%%' % (color.confidence * 100)) if color else '颜色：未知　置信度：—')
         if self.input_mode.currentIndex() == 1:
@@ -601,7 +611,8 @@ class Window(QMainWindow):
         form.addRow('媒体布局', combo)
         form.addRow('目标平台', QLabel('Jetson Xavier NX / JetPack 5（板端实测待完成）'))
         form.addRow('相机 / 串口', QLabel('未连接 / 机械输出关闭'))
-        model_description = ('Linux 20261107 · 八类形状模型' if self.linux_20261107 else
+        model_description = ('补图 24 类 · 单视角检测及表面掩膜' if self.butu_24 else
+                             'Linux 20261107 · 八类形状模型' if self.linux_20261107 else
                              '侧视：26 类旧模型；候选模型须试跑并确认')
         form.addRow('形状 / 掩膜模型', QLabel(model_description))
         path_label = QLabel(str(ROOT/'data/samples'))
@@ -659,13 +670,17 @@ def main():
     parser = argparse.ArgumentParser(description='Xavier NX视觉操作台：离线媒体回放')
     parser.add_argument('--file', type=Path)
     parser.add_argument('--fullscreen', action='store_true')
-    parser.add_argument('--linux-20261107', action='store_true', help='使用新版 Linux 8 类模型')
+    models = parser.add_mutually_exclusive_group()
+    models.add_argument('--linux-20261107', action='store_true', help='使用 Linux 8 类模型')
+    models.add_argument('--butu-24', action='store_true', help='使用补图训练的 24 类形状模型')
     input_type = parser.add_mutually_exclusive_group()
     input_type.add_argument('--preprocessed', action='store_true', help='输入为已处理的 640×320 双摄特征拼图')
     input_type.add_argument('--raw', action='store_true', help='强制使用原始彩色双摄图，覆盖保存的输入类型')
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
-    if args.linux_20261107:
+    if args.butu_24:
+        window = Window(butu_24=True)
+    elif args.linux_20261107:
         from linux_20261107 import make_recognizer
         window = Window(make_recognizer, linux_20261107=True)
     else:

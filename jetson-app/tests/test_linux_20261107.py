@@ -29,6 +29,20 @@ class Linux20261107Tests(unittest.TestCase):
             self.assertEqual(create.call_args.kwargs['model_kind'], 'tray')
             self.assertEqual(create.call_args.args[0].parent.name, 'linux_20261107')
 
+    def test_butu_uses_new_class_order_and_separate_round_with_same_safety_protocol(self):
+        from butu_20261110 import CLASS_NAMES
+        with tempfile.TemporaryDirectory() as folder:
+            window = LiveWindow(data_dir=folder, butu_24=True)
+            try:
+                self.assertEqual(window.names, CLASS_NAMES)
+                self.assertEqual(window._shape_name('ban_yuan_zhu'), '半圆柱')
+                self.assertTrue(window.linux_20261107)
+                self.assertEqual(window.auto_bins_path.name, 'live_auto_bins_butu24.json')
+                self.assertIs(window.pages.currentWidget(), window.competition_page)
+                self.assertFalse(window.start())
+            finally:
+                window.close()
+
     def test_release_opens_competition_with_debug_and_calibration_still_accessible(self):
         with tempfile.TemporaryDirectory() as folder:
             window = LiveWindow(data_dir=folder, linux_20261107=True)
@@ -67,6 +81,77 @@ class Linux20261107Tests(unittest.TestCase):
                 self.assertEqual(competition.table.item(3, 0).text(), '2')
                 self.assertEqual(competition.table_images[0].pixmap().toImage().pixelColor(0, 0).name(), '#0000ff')
             finally:
+                window.close()
+
+    def test_butu_round_repushes_empty_then_sorts_twelve_into_six_bins(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = LiveWindow(data_dir=folder, butu_24=True)
+            machine = window.machine
+            sent = []
+            machine._send = sent.append
+            try:
+                self.assertTrue(machine.begin_handshake())
+                for reply in ('PONG', 'VERSION,ESP32_SORTER_XY_PUSHER,0.1.0',
+                              'STATUS,MCU,WAIT_START,0,0,77'):
+                    machine.handle_mcu(reply)
+                self.assertTrue(machine.confirm_origin())
+                self.assertTrue(machine.handle_mcu('READY'))
+                window.save_calibration(window.calibration_rows)
+                window.calibration_confirmed.setChecked(True)
+                window.vision = SimpleNamespace(capture_empty=lambda _: True,
+                                                locate=lambda *a: True,
+                                                recognize=lambda *a, **kw: True)
+                window._frames_at = time.monotonic()
+                window._models_warm = True
+                window.empty_reference = SimpleNamespace(assess=lambda frames, _: PresenceResult(
+                    'empty' if frames is window.frames else 'occupied', 'replay', {}))
+                self.assertTrue(window.start())
+                self.assertTrue(machine.handle_mcu('STATUS,HOST_READY'))
+                self.assertTrue(machine.handle_mcu('STATUS,START'))
+
+                def reach_scan():
+                    self.assertTrue(machine.handle_mcu('PUSH?'))
+                    window._dispatch_vision()
+                    window.on_located(window._job[0], (100, 75))
+                    self.assertEqual(sent[-1], 'PUSH,100.000,75.000,mm')
+                    self.assertTrue(machine.handle_mcu('SCAN'))
+
+                def scan(detection, color, captures, attempts):
+                    for _ in range(attempts):
+                        window._scan_next_at = 0
+                        window._dispatch_vision()
+                        result = SimpleNamespace(detection=detection, color=color, error=None,
+                            elapsed_ms=20., mask_status=('applied', 'applied'),
+                            preview_bgr=np.zeros((320, 640, 3), np.uint8),
+                            diagnostics={'captures': captures})
+                        window.on_recognized(window._job[0], result)
+
+                reach_scan()
+                scan(None, None, window.frames, 3)
+                self.assertEqual(sent[-1], 'PUSH,WAIT')
+                self.assertEqual(window.auto_bins.total, 0)
+                self.assertEqual(window.bindings, {})
+                shapes = ('ban_yuan_zhu', 'san_leng_zhu', 'si_leng_zhu',
+                          'si_leng_zhui', 'wu_leng_zhu', 'yuan_zhu')
+                color = SimpleNamespace(name='蓝色', confidence=.9, valid_pixels=120)
+                for item, shape in enumerate(shapes * 2):
+                    window._frames_at = time.monotonic()
+                    reach_scan()
+                    scan(SimpleNamespace(class_name=shape, confidence=.9), color, dict(window.frames), 2)
+                    self.assertEqual(sent[-1], 'SORT,%d' % (item % 6 + 1))
+                    self.assertTrue(machine.handle_mcu('DONE'))
+                    self.assertFalse(machine.handle_mcu('PUSH?'))
+                    for check in range(3):
+                        window._dispatch_vision()
+                        window.on_empty_reference(window._job[0], window.frames)
+                        self.assertEqual(window.auto_bins.total, item + int(check == 2))
+                self.assertEqual(window.auto_bins.counts, (2, 2, 2, 2, 2, 2))
+                self.assertEqual(machine.snapshot().state, 'stopped')
+                self.assertFalse(machine.handle_mcu('PUSH?'))
+                self.assertEqual(len([line for line in sent if line.startswith('SORT,')]), 12)
+            finally:
+                window.vision = None
+                machine.disconnect()
                 window.close()
 
     def exercise_drop(self, previous_count):

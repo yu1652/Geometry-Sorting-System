@@ -418,6 +418,16 @@ class BackendContractTests(unittest.TestCase):
         self.addCleanup(backend.close)
         self.assertEqual(backend.infer(np.zeros(input_shape, dtype=np.float32)).shape, output_shape)
 
+    def test_butu_engine_uses_320_input_and_24_class_output(self):
+        from trt_backend import TensorRTBackend
+
+        events = []
+        input_shape, output_shape = (1, 3, 320, 320), (1, 28, 2100)
+        engine = FakeEngine(events, input_shape=input_shape, output_shape=output_shape)
+        backend = TensorRTBackend(b'engine', 'yolo_butu24', FakeTrt(engine), FakeCuda(events))
+        self.addCleanup(backend.close)
+        self.assertEqual(backend.infer(np.zeros(input_shape, dtype=np.float32)).shape, output_shape)
+
     def test_win8_engine_rejects_mismatched_input_or_output_contract_before_allocating(self):
         from trt_backend import EngineContractError, TensorRTBackend
 

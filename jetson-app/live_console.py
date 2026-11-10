@@ -79,9 +79,17 @@ def validate_points(rows, *, roi=TRAY_ROI, physical_region=MACHINE_REGION):
 class LiveWindow(QMainWindow):
     simulation_mode = False
 
-    def __init__(self, data_dir=None, vision_factory=LiveVisionWorker, serial_factory=serial.Serial, *, linux_20261107=False):
+    def __init__(self, data_dir=None, vision_factory=LiveVisionWorker, serial_factory=serial.Serial, *,
+                 linux_20261107=False, butu_24=False):
         super().__init__()
-        self.linux_20261107 = linux_20261107
+        self.butu_24 = butu_24
+        if butu_24:
+            import butu_20261110 as profile
+        else:
+            profile = release if linux_20261107 else None
+        self._shape_profile = profile
+        self._profile_label = '补图 24 类' if butu_24 else 'Linux 20261107'
+        linux_20261107 = self.linux_20261107 = profile is not None
         self._models_warm = False
         self.release_competition = None
         self._round_images = {}
@@ -93,7 +101,8 @@ class LiveWindow(QMainWindow):
         self._drop_checks = self._drop_empty_matches = 0
         self.data_dir = Path(data_dir) if data_dir else ROOT / 'data'
         self.calibration_path = self.data_dir / 'live_calibration.json'
-        self.auto_bins_path = self.data_dir / ('live_auto_bins_20261107.json' if linux_20261107 else 'live_auto_bins.json')
+        round_suffix = '_butu24' if butu_24 else ('_20261107' if linux_20261107 else '')
+        self.auto_bins_path = self.data_dir / ('live_auto_bins' + round_suffix + '.json')
         self.device_path = self.data_dir / 'live_devices.json'
         self.diagnostics = RuntimeDiagnostics(self.data_dir)
         self.empty_reference = EmptySceneReference(self.data_dir / 'recognition_empty.npz')
@@ -103,7 +112,7 @@ class LiveWindow(QMainWindow):
         self._scan_next_at = 0
         self._empty_matches = 0
         self.calibration_frame = normalize_frame_settings()
-        self.names = (release.CLASS_NAMES if linux_20261107 else
+        self.names = (profile.CLASS_NAMES if profile is not None else
                       (ROOT / 'models/legacy_classes.txt').read_text(encoding='utf8').splitlines())
         self.sources = dict(DEFAULT_SOURCES)
         self._vision_factory, self._serial_factory = vision_factory, serial_factory
@@ -129,7 +138,7 @@ class LiveWindow(QMainWindow):
         self._binding_error = None
         self.calibration_valid = False
         self.calibration_rows = list(DEFAULT_POINTS)
-        self.setWindowTitle('YLERS · Xavier NX 实机分拣操作台' + (' · Linux 20261107' if linux_20261107 else ''))
+        self.setWindowTitle('YLERS · Xavier NX 实机分拣操作台' + (' · ' + self._profile_label if linux_20261107 else ''))
         self.setStyleSheet(STYLE)
         self.resize(1024, 600 if linux_20261107 else 680)
         self._make_ui()
@@ -144,7 +153,8 @@ class LiveWindow(QMainWindow):
         attempts = release.SCAN_ATTEMPTS if linux_20261107 else 8
         self.write_log('自动识别：模型就绪后重新取图，等待至少 0.8 秒；最多复核 %d 次，连续两次形状和颜色一致才投箱。' % attempts)
         if linux_20261107:
-            self.write_log('Linux 20261107：八类形状模型，投箱后验空，本轮目标 %d 件。' % release.ROUND_SIZE)
+            self.write_log('%s：%d 类形状，投箱后验空，本轮目标 %d 件。'
+                           % (self._profile_label, len(self.names), release.ROUND_SIZE))
         self.write_log('先清空识别区并采集空区参考；双摄连续三次确认空区后才自动请求新一轮推料。')
 
     def _make_ui(self):
@@ -322,7 +332,7 @@ class LiveWindow(QMainWindow):
         self.machine_status.setText('状态 %s · XY %.1f, %.1f mm · 升降 %s · %s' % (
             state.state, state.x_mm, state.y_mm, '下降' if state.pusher_down else '抬起',
             '动作等待确认' if self.machine.pending else ''))
-        self.banner.setText(('Linux 20261107' if self.linux_20261107 else '实机模式') + ' · %s · %s · 自动分箱 %s/6' % (
+        self.banner.setText((self._profile_label if self.linux_20261107 else '实机模式') + ' · %s · %s · 自动分箱 %s/6' % (
             '零点已确认' if state.origin_confirmed else '待手动对零确认',
             '通信已验收' if self.machine.ready else '通信未就绪', len(self.bindings)))
         if self.release_competition is not None:
@@ -498,7 +508,7 @@ class LiveWindow(QMainWindow):
             self._models_warm = False
             settings = {}
             if self.linux_20261107:
-                settings = dict(recognizer_factory=release.make_recognizer, tray_factory=release.make_tray_backend,
+                settings = dict(recognizer_factory=self._shape_profile.make_recognizer, tray_factory=release.make_tray_backend,
                                 drain_batches=5, tray_feature_input=True,
                                 tray_compensation=release.TRAY_COMPENSATION, warm_models=True)
             self.vision = self._vision_factory(self.sources, self, **settings)
@@ -1047,7 +1057,7 @@ class LiveWindow(QMainWindow):
         self.debug_item_label.setText('货物名称：' + self._current_item['name'])
 
     def _shape_name(self, shape):
-        return release.SHAPES.get(shape, shape) if self.linux_20261107 else shape
+        return self._shape_profile.SHAPES.get(shape, shape) if self._shape_profile is not None else shape
 
     @property
     def bindings(self):
@@ -1258,7 +1268,9 @@ class LiveWindow(QMainWindow):
             if not cv2.imwrite(str(path), raw):
                 raise OSError('无法保存模型试跑图片')
             arguments = [sys.executable, str(ROOT / 'app.py'), '--raw', '--file', str(path)]
-            if self.linux_20261107:
+            if self.butu_24:
+                arguments.append('--butu-24')
+            elif self.linux_20261107:
                 arguments.append('--linux-20261107')
             self._model_process = subprocess.Popen(arguments, cwd=str(ROOT))
             self.write_log('已打开离线模型验证窗口。')
@@ -1294,10 +1306,12 @@ class LiveWindow(QMainWindow):
 def main():
     parser = argparse.ArgumentParser(description='Xavier NX 实机调试、比赛与九点标定')
     parser.add_argument('--fullscreen', action='store_true')
-    parser.add_argument('--linux-20261107', action='store_true', help='使用新版 Linux 8 类模型和比赛流程')
+    models = parser.add_mutually_exclusive_group()
+    models.add_argument('--linux-20261107', action='store_true', help='使用 Linux 8 类模型和比赛流程')
+    models.add_argument('--butu-24', action='store_true', help='使用补图训练的 24 类形状模型')
     args = parser.parse_args()
     application = QApplication(sys.argv[:1])
-    window = LiveWindow(linux_20261107=args.linux_20261107)
+    window = LiveWindow(linux_20261107=args.linux_20261107, butu_24=args.butu_24)
     window.showFullScreen() if args.fullscreen else window.show()
     return application.exec()
 

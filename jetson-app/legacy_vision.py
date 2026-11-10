@@ -70,13 +70,15 @@ class LegacyResult:
 class LegacyRecognizer:
     """Own the supplied backends on the thread that constructs this recognizer."""
 
-    def __init__(self, detector, segmenter, class_names, config, *, expected_count=26, capture_color_sample=False):
+    def __init__(self, detector, segmenter, class_names, config, *, expected_count=26, capture_color_sample=False,
+                 per_view_features=False):
         self._detector = detector
         self._segmenter = segmenter
         self._class_names = tuple(class_names)
         self._config = config
         self._expected_count = expected_count
         self._capture_color_sample = capture_color_sample
+        self._per_view_features = per_view_features
         self._owner = threading.current_thread()
         self._closed = False
 
@@ -104,16 +106,33 @@ class LegacyRecognizer:
 
         model = self._config.get("model", {})
         try:
-            raw_output = self._detector.infer(tensor)
-            diagnostics['raw_output'] = np.array(raw_output, copy=True)
-            detections = decode_yolo_raw(
-                raw_output,
-                transform,
-                self._class_names,
-                model.get("confidence_threshold", 0.45),
-                model.get("iou_threshold", 0.50),
-                expected_count=self._expected_count,
-            )
+            if self._per_view_features:
+                if self._expected_count != 24 or len(self._class_names) != 24:
+                    raise ValueError('per-view feature detector requires 24 classes')
+                outputs = []
+                detections = []
+                half_transform = LetterboxTransform(320, 320, 320, 1, 0, 0, 320, 320)
+                for side in range(2):
+                    half_tensor = np.ascontiguousarray(tensor[:, :, 160:480, side * 320:(side + 1) * 320])
+                    raw_output = self._detector.infer(half_tensor)
+                    if raw_output.shape != (1, 28, 2100):
+                        raise ValueError('per-view detector output must be [1,28,2100]')
+                    outputs.append(np.array(raw_output, copy=True))
+                    local = decode_yolo_raw(raw_output, half_transform, self._class_names,
+                                            model.get('confidence_threshold', 0.45),
+                                            model.get('iou_threshold', 0.50), expected_count=24)
+                    detections.extend(Detection(item.class_id, item.class_name, item.confidence,
+                                                (item.box[0] + side * 320, item.box[1],
+                                                 item.box[2] + side * 320, item.box[3])) for item in local)
+                detections.sort(key=lambda item: -item.confidence)
+                diagnostics['raw_output'] = np.stack(outputs)
+            else:
+                raw_output = self._detector.infer(tensor)
+                diagnostics['raw_output'] = np.array(raw_output, copy=True)
+                detections = decode_yolo_raw(
+                    raw_output, transform, self._class_names,
+                    model.get("confidence_threshold", 0.45),
+                    model.get("iou_threshold", 0.50), expected_count=self._expected_count)
         except Exception as exc:
             return LegacyResult(
                 None, None, ("detection_error", "detection_error"), preview,
@@ -159,7 +178,8 @@ class LegacyRecognizer:
                 pixels = target[mask].astype(np.float32)
                 target[mask] = np.rint(pixels * .65 + np.array((0, 255, 0)) * .35).astype(np.uint8)
             source = 'none'
-            if candidates and not preprocessed:
+            if (candidates and not preprocessed
+                    and (not self._per_view_features or candidates[0][0].class_id == detections[0].class_id)):
                 detection = candidates[0][0]
                 source = 'mask' if mask is not None else 'box'
                 color_roi = surface_box or box
