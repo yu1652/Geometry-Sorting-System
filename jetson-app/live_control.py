@@ -1,10 +1,9 @@
 """Real ESP32 protocol controller. Only received MCU events acknowledge actions."""
 import math
-import re
 import time
 from collections import deque
 
-from motion_limits import X_MAX_MM, Y_MAX_MM, position_in_machine
+from motion_limits import PUSH_END_X_MM, STEPS_PER_MM, X_MAX_MM, Y_MAX_MM, position_in_machine
 from sorter_simulation import SorterSnapshot
 
 
@@ -29,7 +28,9 @@ class LiveController:
         self._send, self._clock, self._timeout = send, clock, timeout
         self._verify_drop = verify_drop
         self._scan_timeout = scan_timeout
-        self._steps = tuple(steps_per_mm)
+        self._legacy_steps = tuple(steps_per_mm)
+        self._steps = self._legacy_steps
+        self._push_end_x = 10.0
         self._connected = False
         self.ready = False
         self.epoch = 0
@@ -38,7 +39,7 @@ class LiveController:
         self._pending = None
         self._target = None
         self._bin = None
-        self._x = self._y = 0.0
+        self._pulses = (0, 0)
         self._pusher_down = False
         self._counts = [0] * 6
         self._log = deque(maxlen=200)
@@ -69,7 +70,8 @@ class LiveController:
         return self.epoch
 
     def snapshot(self):
-        return SorterSnapshot(self._state, self._origin, self._x, self._y,
+        x, y = (pulses / scale for pulses, scale in zip(self._pulses, self._steps))
+        return SorterSnapshot(self._state, self._origin, x, y,
                               self._pusher_down, sum(self._counts), tuple(self._counts),
                               tuple(self._log), self._last_error)
 
@@ -199,11 +201,16 @@ class LiveController:
         if x is None and y is None:
             self._wait('running')
             return self._write('PUSH,WAIT')
-        if not _position(x, y) or float('{:.3f}'.format(x)) <= 10:
-            self._fault('推料坐标越界或方向无效')
+        if not _position(x, y):
+            self._fault('推料坐标越界')
+            return False
+        wire_x = '{:.3f}'.format(x)
+        x_steps = self._steps[0]
+        if math.floor(float(wire_x) * x_steps + 0.5) <= math.floor(self._push_end_x * x_steps + 0.5):
+            self._fault('推料起点须在 X={:g} mm 终止线右侧至少一步'.format(self._push_end_x))
             return False
         self._wait('wait_scan')
-        return self._write('PUSH,{:.3f},{:.3f},mm'.format(x, y))
+        return self._write('PUSH,{},{:.3f},mm'.format(wire_x, y))
 
     def provide_sort(self, bin_id):
         if self._state == 'recognizing' and self._expired_action():
@@ -270,7 +277,7 @@ class LiveController:
         if line == 'READY':
             self._last_rx = self._clock()
             if self._state == 'resetting':
-                self._x = self._y = 0.0
+                self._pulses = (0, 0)
                 self._mcu_state = 'WAIT_START'
                 self._origin = True
                 self._pusher_down = False
@@ -280,8 +287,15 @@ class LiveController:
             return self.begin_handshake()
         if line == 'PONG':
             self._got_pong = True
-        elif (len(fields) == 3 and fields[:2] == ['VERSION', 'ESP32_SORTER_XY_PUSHER']
-              and re.fullmatch(r'\d+\.\d+\.\d+', fields[2])):
+        elif len(fields) == 3 and fields[:2] == ['VERSION', 'ESP32_SORTER_XY_PUSHER']:
+            if self._state != 'handshaking':
+                return False
+            if fields[2] == '0.1.0':
+                self._steps, self._push_end_x = self._legacy_steps, 10.0
+            elif fields[2] == '0.1.1':
+                self._steps, self._push_end_x = STEPS_PER_MM, PUSH_END_X_MM
+            else:
+                return False
             self._got_version = True
         elif fields[:2] == ['STATUS', 'MCU']:
             return self._mcu_status(fields)
@@ -325,7 +339,7 @@ class LiveController:
             self.begin_handshake()
         self._boot_id = fields[5]
         self._mcu_state = fields[2]
-        self._x, self._y = (pulses[i] / self._steps[i] for i in range(2))
+        self._pulses = pulses
         self._last_rx = self._clock()
         self._got_status = True
         self._finish_handshake()

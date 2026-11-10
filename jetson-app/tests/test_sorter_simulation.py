@@ -57,7 +57,7 @@ class SorterSimulationTests(unittest.TestCase):
             with self.subTest(x=x, y=y):
                 self.assertFalse(self.sorter.goto(x, y))
         self.assertTrue(self.sorter.start())
-        for x in [10, 10.01, 260.001, float("nan")]:
+        for x in [40, 40.01, 260.001, float("nan")]:
             self.assertFalse(self.sorter.run_cycle(x, 20, 1))
         self.assertEqual(self.sorter.snapshot().state, "running")
         self.assertEqual(self.sorter.snapshot().completed_count, 0)
@@ -77,15 +77,15 @@ class SorterSimulationTests(unittest.TestCase):
 
     def test_invalid_bin_stops_without_counting(self):
         self.start_sorter()
-        self.assertFalse(self.sorter.run_cycle(20, 30, True))
+        self.assertFalse(self.sorter.run_cycle(60, 30, True))
         self.assertEqual(self.sorter.snapshot().completed_count, 0)
         self.assertEqual(self.sorter.snapshot().state, "stopped")
 
     def test_duplicate_push_replays_plan_and_stopped_cycle_ignores_late_done(self):
         self.start_sorter()
-        self.assertTrue(self.sorter.begin_cycle(20, 30, 4))
+        self.assertTrue(self.sorter.begin_cycle(60, 30, 4))
         self.assertTrue(self.sorter.handle_mcu("PUSH?"))
-        self.assertEqual(self.sorter.snapshot().log.count("HOST PUSH,20.0,30.0,mm"), 2)
+        self.assertEqual(self.sorter.snapshot().log.count("HOST PUSH,60.0,30.0,mm"), 2)
         self.assertFalse(self.sorter.handle_mcu("DONE"))
         self.assertTrue(self.sorter.handle_mcu("SCAN"))
         self.assertFalse(self.sorter.handle_mcu("SCAN"))
@@ -97,7 +97,7 @@ class SorterSimulationTests(unittest.TestCase):
         self.start_sorter()
         self.assertTrue(self.sorter.handle_mcu("PUSH?"))
         self.assertEqual(self.sorter.snapshot().log[-1], "HOST PUSH,WAIT")
-        self.assertFalse(self.sorter.run_cycle(10.01, 20, 1))
+        self.assertFalse(self.sorter.run_cycle(40.01, 20, 1))
         self.assertIn("HOST PUSH,NG", self.sorter.snapshot().log)
         self.assertEqual(self.sorter.snapshot().state, "running")
 
@@ -112,7 +112,7 @@ class SorterSimulationTests(unittest.TestCase):
         self.assertTrue(self.sorter.run_cycle(260, 230, 1))
         snapshot = self.sorter.snapshot()
         self.assertIn('HOST PUSH,260.0,230.0,mm', snapshot.log)
-        self.assertEqual((snapshot.x_mm, snapshot.y_mm), (49, 5))
+        self.assertEqual((snapshot.x_mm, snapshot.y_mm), (10, 10))
         self.assertEqual(snapshot.completed_count, 1)
 
     def test_auto_beyond_either_axis_never_sends_coordinate_push(self):
