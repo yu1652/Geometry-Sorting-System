@@ -208,8 +208,7 @@ bool xyInSoftLimit(long x, long y) {
 }
 
 bool xyInSoftLimitMm(float xMm, float yMm) {
-    return xMm >= X_MIN_PULSE / X_STEPS_PER_MM && xMm <= X_MAX_PULSE / X_STEPS_PER_MM
-        && yMm >= Y_MIN_PULSE / Y_STEPS_PER_MM && yMm <= Y_MAX_PULSE / Y_STEPS_PER_MM;
+    return xyInSoftLimit(xyMmToPulseX(xMm), xyMmToPulseY(yMm));
 }
 
 bool xyInTrayRangeMm(float xMm, float yMm) {

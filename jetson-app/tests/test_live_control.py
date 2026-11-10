@@ -9,15 +9,15 @@ class LiveControllerTests(unittest.TestCase):
         self.now = 0.0
         self.control = LiveController(self.sent.append, clock=lambda: self.now, timeout=30)
 
-    def handshake(self, version='0.1.0'):
+    def handshake(self):
         self.control.begin_handshake()
-        for line in ('PONG', 'VERSION,ESP32_SORTER_XY_PUSHER,' + version,
+        for line in ('PONG', 'VERSION,ESP32_SORTER_XY_PUSHER,0.1.0',
                      'STATUS,MCU,WAIT_START,0,0,123'):
             self.control.handle_mcu(line)
         self.assertTrue(self.control.ready)
 
-    def arm(self, version='0.1.0'):
-        self.handshake(version)
+    def arm(self):
+        self.handshake()
         self.assertTrue(self.control.confirm_origin())
         self.assertEqual(self.sent[-1], 'RESET')
         self.control.handle_mcu('STATUS,PUSHER_UP')
@@ -25,8 +25,8 @@ class LiveControllerTests(unittest.TestCase):
         self.assertNotIn('HOST_READY', self.sent)
         self.assertTrue(self.control.snapshot().origin_confirmed)
 
-    def start_running(self, version='0.1.0'):
-        self.arm(version)
+    def start_running(self):
+        self.arm()
         self.assertTrue(self.control.start())
         self.assertEqual(self.sent[-1], 'HOST_READY')
         self.control.handle_mcu('STATUS,HOST_READY')
@@ -93,33 +93,6 @@ class LiveControllerTests(unittest.TestCase):
         self.control.handle_mcu('STATUS,MCU,WAIT_START,10400,8970,123')
         self.assertIsNone(self.control.pending)
         self.assertEqual((self.control.snapshot().x_mm, self.control.snapshot().y_mm), (260, 230))
-
-    def test_new_firmware_uses_40_y_steps_even_if_status_arrives_before_version(self):
-        self.control.begin_handshake()
-        self.control.handle_mcu('PONG')
-        self.control.handle_mcu('STATUS,MCU,WAIT_START,800,1200,123')
-        self.control.handle_mcu('VERSION,ESP32_SORTER_XY_PUSHER,0.1.1')
-        self.assertTrue(self.control.ready)
-        self.assertEqual((self.control.snapshot().x_mm, self.control.snapshot().y_mm), (20, 30))
-        self.assertTrue(self.control.confirm_origin())
-        self.control.handle_mcu('READY')
-        self.assertTrue(self.control.goto(260, 230))
-        self.control.handle_mcu('STATUS,MCU,WAIT_START,10400,8970,123')
-        self.assertEqual(self.control.pending, 'goto')
-        self.control.handle_mcu('STATUS,MCU,WAIT_START,10400,9200,123')
-        self.assertIsNone(self.control.pending)
-        self.assertEqual((self.control.snapshot().x_mm, self.control.snapshot().y_mm), (260, 230))
-
-    def test_new_firmware_rejects_a_target_without_negative_x_travel(self):
-        for x in (39, 40, 40.001, 40.025):
-            with self.subTest(x=x):
-                self.setUp()
-                self.start_running(version='0.1.1')
-                self.control.handle_mcu('PUSH?')
-                previous = len(self.sent)
-                self.assertEqual(self.control.provide_target(x, 20), x == 40.025)
-                expected = ['PUSH,40.025,20.000,mm'] if x == 40.025 else ['STOP', 'STATUS?']
-                self.assertEqual(self.sent[previous:], expected)
 
     def test_push_accepts_machine_corner_above_tray_size(self):
         self.start_running()

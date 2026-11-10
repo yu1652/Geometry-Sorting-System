@@ -23,7 +23,7 @@ static const int X_DIR_POSITIVE_LEVEL = HIGH;
 static const int Y_DIR_POSITIVE_LEVEL = LOW;
 
 static const float X_STEPS_PER_MM = 40.0f;
-static const float Y_STEPS_PER_MM = 40.0f;
+static const float Y_STEPS_PER_MM = 39.0f;
 
 static const float TRAY_WIDTH_MM = 160.0f;
 static const float TRAY_HEIGHT_MM = 160.0f;
@@ -48,9 +48,9 @@ static const long PUSH_ACCEL_STEPS = 200;
 static const bool XY_HOLD_ENABLE = true;
 
 static const long X_MIN_PULSE = 0;
-static const long X_MAX_PULSE = static_cast<long>(260.0f * X_STEPS_PER_MM);
-static const long Y_MIN_PULSE = 0;
-static const long Y_MAX_PULSE = static_cast<long>(230.0f * Y_STEPS_PER_MM);
+static const long X_MAX_PULSE = 200000;
+static const long Y_MIN_PULSE = -1200;
+static const long Y_MAX_PULSE = 200000;
 
 static const long HOME_X_PULSE = 0;
 static const long HOME_Y_PULSE = 0;
@@ -72,11 +72,11 @@ static const unsigned int HOME_FAST_STEP_INTERVAL_US = 700;
 static const unsigned int HOME_SLOW_STEP_INTERVAL_US = 1800;
 static const unsigned int HOME_BACKOFF_STEP_INTERVAL_US = 1200;
 
-static const float PUSH_END_X_MM = 40.0f;
+static const float PUSH_END_X_MM = 10.0f;
 
 static const bool MOVE_TO_PARK_AFTER_PUSH = true;
-static const float PARK_X_MM = 10.0f;
-static const float PARK_Y_MM = 10.0f;
+static const float PARK_X_MM = 49.0f;
+static const float PARK_Y_MM = 5.0f;
 
 static const unsigned long PUSH_RETRY_MS = 800;
 

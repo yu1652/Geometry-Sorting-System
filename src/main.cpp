@@ -146,7 +146,7 @@ static void handleCommand(String command) {
         return;
     }
     if (command == "VERSION?") {
-        sendText("VERSION,ESP32_SORTER_XY_PUSHER,0.1.1");
+        sendText("VERSION,ESP32_SORTER_XY_PUSHER,0.1.0");
         return;
     }
     if (command == "STATUS?") {
@@ -353,6 +353,11 @@ static void handlePushPlan(const PushPlan &plan) {
     }
     const float endXmm = PUSH_END_X_MM;
     const float endYmm = plan.startYmm;
+    if (endXmm >= plan.startXmm) {
+        sendText("ERROR,PUSH_DIRECTION_NOT_NEGATIVE_X");
+        schedulePushRetry();
+        return;
+    }
     if (PUSH_MM_LIMIT_TO_TRAY_RANGE &&
         (!xyInTrayRangeMm(plan.startXmm, plan.startYmm) || !xyInTrayRangeMm(endXmm, endYmm))) {
         sendText("ERROR,PUSH_OUT_OF_TRAY");
@@ -361,11 +366,6 @@ static void handlePushPlan(const PushPlan &plan) {
     }
     if (!xyInSoftLimitMm(plan.startXmm, plan.startYmm) || !xyInSoftLimitMm(endXmm, endYmm)) {
         sendText("ERROR,PUSH_OUT_OF_RANGE");
-        schedulePushRetry();
-        return;
-    }
-    if (xyMmToPulseX(endXmm) >= xyMmToPulseX(plan.startXmm)) {
-        sendText("ERROR,PUSH_DIRECTION_NOT_NEGATIVE_X");
         schedulePushRetry();
         return;
     }

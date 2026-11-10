@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 
-from motion_limits import PARK_MM, PUSH_END_X_MM, X_MAX_MM, Y_MAX_MM, position_in_machine
+from motion_limits import X_MAX_MM, Y_MAX_MM, position_in_machine
 
 
 MAX_X_MM = X_MAX_MM
 MAX_Y_MM = Y_MAX_MM
+PUSH_END_X_MM = 10.0
+PARK_MM = (49.0, 5.0)
 
 
 @dataclass(frozen=True)
