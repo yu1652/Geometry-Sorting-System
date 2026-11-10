@@ -25,7 +25,7 @@ import serial
 from serial.tools import list_ports
 
 from esp32_serial import SerialLineTransport, SerialTransportError
-from live_control import LiveController
+from live_control import AUTO_STATES, LiveController
 from live_vision import LiveVisionWorker
 from legacy_vision import surface_summary
 from calibration_frame import normalize_frame_settings
@@ -33,6 +33,7 @@ from motion_limits import MACHINE_REGION, X_MAX_MM, Y_MAX_MM, position_in_machin
 from auto_bins import AutoBinSession, CapacityFull
 from runtime_diagnostics import RuntimeDiagnostics
 from scan_gate import ScanConsensus
+from sorter_simulation import PARK_MM, PUSH_END_X_MM
 from scene_presence import EmptySceneReference, PresenceResult
 import linux_20261107 as release
 from sorter_console import (CalibrationDialog, DEFAULT_POINTS, TRAY_ROI,
@@ -42,8 +43,6 @@ ROOT = Path(__file__).resolve().parent
 ROLES = ('left', 'right', 'top')
 CAMERA_TITLES = ('识别区俯拍 / 拼图左', '识别区侧视 / 拼图右', '托盘定位俯拍')
 COLORS = ('红色', '橙色', '黄色', '绿色', '青色', '蓝色', '紫色', '黑色', '白色', '灰色')
-AUTO_STATES = {'enabling_auto', 'starting', 'running', 'locating', 'wait_scan', 'recognizing',
-               'wait_repush', 'wait_done', 'verifying_drop'}
 DEFAULT_SOURCES = {
     role: '/dev/v4l/by-path/platform-3610000.xhci-usb-0:%s:1.0-video-index0' % port
     for role, port in zip(ROLES, ('2.1', '2.2', '2.4'))
@@ -84,6 +83,12 @@ class LiveWindow(QMainWindow):
         super().__init__()
         self.linux_20261107 = linux_20261107
         self._models_warm = False
+        self.release_competition = None
+        self._round_images = {}
+        self._current_item = {}
+        self._tray_status = '等待托盘定位'
+        self._release_status = None
+        self._competition_preview_at = 0.0
         self._drop_epoch = None
         self._drop_checks = self._drop_empty_matches = 0
         self.data_dir = Path(data_dir) if data_dir else ROOT / 'data'
@@ -103,7 +108,8 @@ class LiveWindow(QMainWindow):
         self.sources = dict(DEFAULT_SOURCES)
         self._vision_factory, self._serial_factory = vision_factory, serial_factory
         self.machine = LiveController(self._send, verify_drop=linux_20261107,
-                                      scan_timeout=release.SCAN_TIMEOUT if linux_20261107 else None)
+                                      scan_timeout=release.SCAN_TIMEOUT if linux_20261107 else None,
+                                      done_timeout=release.DONE_TIMEOUT if linux_20261107 else None)
         self.serial_port = self.transport = self.vision = None
         self._handshake_at = None
         self._flushed = False
@@ -125,10 +131,12 @@ class LiveWindow(QMainWindow):
         self.calibration_rows = list(DEFAULT_POINTS)
         self.setWindowTitle('YLERS · Xavier NX 实机分拣操作台' + (' · Linux 20261107' if linux_20261107 else ''))
         self.setStyleSheet(STYLE)
-        self.resize(1024, 680)
+        self.resize(1024, 600 if linux_20261107 else 680)
         self._make_ui()
         self._load_settings()
         self._load_auto_bins()
+        if self.linux_20261107:
+            self.show_competition()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_serial)
         self.timer.start(40)
@@ -166,7 +174,28 @@ class LiveWindow(QMainWindow):
         self.debug_page, self.competition_page = QWidget(), QWidget()
         self.pages.addWidget(self.debug_page)
         self.pages.addWidget(self.competition_page)
+        self.machine_status = QLabel('串口未连接')
+        if self.linux_20261107:
+            from release_competition import ReleaseCompetition
+            from release_debug import build_release_debug
+
+            self.banner.hide()
+            connection.setSpacing(4)
+            root.setStyleSheet(
+                'QPushButton {padding:3px 7px;min-height:18px;}'
+                'QComboBox {padding:2px 5px;}'
+            )
+            build_release_debug(self)
+            self.debug_park_label.setText('PARK 等待点\n%g, %g mm' % PARK_MM)
+            self.debug_push_end_label.setText('推料终止线\nX=%g mm' % PUSH_END_X_MM)
+            competition = QVBoxLayout(self.competition_page)
+            competition.setContentsMargins(0, 0, 0, 0)
+            self.release_competition = ReleaseCompetition(self)
+            competition.addWidget(self.release_competition)
+            return
+
         self._make_debug_page()
+        self.tray_log_view = self.serial_log_view = self.log_view
         self._make_competition_page()
         controls = QHBoxLayout()
         self.actions = {}
@@ -180,7 +209,6 @@ class LiveWindow(QMainWindow):
             control = self.actions[label] = button(label, callback)
             controls.addWidget(control)
         outer.addLayout(controls)
-        self.machine_status = QLabel('串口未连接')
         outer.addWidget(self.machine_status)
 
     def _make_debug_page(self):
@@ -237,9 +265,9 @@ class LiveWindow(QMainWindow):
             boxes.addWidget(label)
         layout.addLayout(boxes)
 
-    def write_log(self, message):
+    def write_log(self, message, *, view=None):
         line = datetime.now().strftime('%H:%M:%S') + ' ' + str(message)
-        self.log_view.append(line)
+        (self.log_view if view is None else view).append(line)
         self._persist_log(message)
         self.statusBar().showMessage(str(message))
         self.update_state()
@@ -297,6 +325,42 @@ class LiveWindow(QMainWindow):
         self.banner.setText(('Linux 20261107' if self.linux_20261107 else '实机模式') + ' · %s · %s · 自动分箱 %s/6' % (
             '零点已确认' if state.origin_confirmed else '待手动对零确认',
             '通信已验收' if self.machine.ready else '通信未就绪', len(self.bindings)))
+        if self.release_competition is not None:
+            status = self._release_status_values(state)
+            self.debug_status_label.setText('状态：' + status[0])
+            self.debug_serial_label.setText('串口：' + status[1])
+            self.debug_tray_status_label.setText('托盘定位：' + status[2])
+            self.debug_position_label.setText(self.machine_status.text())
+            self.debug_home_label.setText('HOME 原点\n' + ('0, 0 mm' if state.origin_confirmed else '待对零'))
+            paused = self.machine.feed_pause_requested
+            for button in (self.debug_pause_button, self.release_competition.pause_button):
+                button.setText('继续' if paused else '暂停')
+                button.setEnabled(self.machine.ready and state.state in AUTO_STATES)
+            if status != self._release_status:
+                self._refresh_binding_display()
+
+    def _release_status_values(self, state):
+        if self._binding_error:
+            status = '本轮记录待检查'
+        elif self.auto_bins is not None and self.auto_bins.total >= release.ROUND_SIZE:
+            status = '本轮已完成'
+        elif state.state == 'paused':
+            status = '已暂停进料'
+        elif self.machine.feed_pause_requested:
+            status = '本件完成后暂停进料'
+        elif state.state in AUTO_STATES:
+            status = '自动分拣中'
+        elif state.state == 'armed':
+            status = '零点已确认，待启动'
+        elif state.state == 'stopped':
+            status = '已停止，继续前需手动对零'
+        elif self.machine.ready:
+            status = '待手动对零'
+        else:
+            status = '等待设备就绪'
+        serial_status = '已验收' if self.machine.ready else ('握手中' if self.serial_port else '未连接')
+        tray_status = self._tray_status if self._frames_at is not None else '相机未就绪'
+        return status, serial_status, tray_status
 
     def refresh_ports(self):
         current = self.port_picker.currentText() or '/dev/ttyUSB0'
@@ -308,7 +372,7 @@ class LiveWindow(QMainWindow):
         if self.transport is None:
             raise SerialTransportError('串口未连接')
         self.transport.write_line(line)
-        self.log_view.append('HOST ' + line)
+        self.serial_log_view.append('HOST ' + line)
         self._persist_log('HOST ' + line)
 
     def connect_serial(self):
@@ -383,10 +447,15 @@ class LiveWindow(QMainWindow):
                 else:
                     for line in self.transport.read_lines():
                         previous = self.machine.snapshot().completed_count
-                        self.log_view.append('MCU ' + line)
+                        self.serial_log_view.append('MCU ' + line)
                         self._persist_log('MCU ' + line)
                         handled = self.machine.handle_mcu(line)
-                        if self.machine.snapshot().completed_count > previous:
+                        state = self.machine.snapshot()
+                        if handled and not self.machine.connected:
+                            self._finish_serial_close()
+                            self.write_log(state.last_error or '串口控制已断开。', view=self.serial_log_view)
+                            break
+                        if state.completed_count > previous:
                             self.record_completion()
                         stopped = handled and self.machine.snapshot().state == 'stopped' and (
                             line == 'STATUS,STOP' or line.startswith('STATUS,MCU,STOP,'))
@@ -458,8 +527,32 @@ class LiveWindow(QMainWindow):
             return
         self.frames = frames
         self._frames_at = time.monotonic()
+        if self.release_competition is None or self.pages.currentWidget() is self.debug_page:
+            self._show_debug_frames()
+        elif self._frames_at - self._competition_preview_at >= .15:
+            self._show_competition_frames()
+
+    def _show_debug_frames(self):
         for role in ROLES:
-            self.views[role].show_frame(frames[role])
+            frame = self.frames[role]
+            if role == 'top' and self.release_competition is not None:
+                frame = frame.copy()
+                x, y, width, height = release.TRAY_ROI
+                cv2.rectangle(frame, (x, y), (x + width - 1, y + height - 1), (0, 220, 140), 1)
+                if self.calibration_valid:
+                    for name, px, py, _, _ in self.calibration_rows:
+                        point = (round(px), round(py))
+                        cv2.circle(frame, point, 3, (30, 215, 255), -1)
+                        cv2.putText(frame, name, (point[0] + 4, point[1] - 3),
+                                    cv2.FONT_HERSHEY_SIMPLEX, .35, (30, 215, 255), 1)
+            self.views[role].show_frame(frame)
+
+    def _show_competition_frames(self):
+        if self._frames_at is None:
+            self.release_competition.set_frames(None, None)
+        else:
+            self._competition_preview_at = self._frames_at
+            self.release_competition.set_frames(self.frames['right'], self.frames['top'])
 
     def _vision_finished(self):
         if self.vision is not None and not self.vision.wait(0):
@@ -470,6 +563,9 @@ class LiveWindow(QMainWindow):
             worker.deleteLater()
         self._job = None
         self._frames_at = None
+        self._tray_status = '等待托盘定位'
+        if self.release_competition is not None:
+            self._show_competition_frames()
         self.camera_button.setText('连接三路相机')
         for view in self.views.values():
             view.frame = None
@@ -580,6 +676,20 @@ class LiveWindow(QMainWindow):
                 and self.calibration_valid and self.calibration_confirmed.isChecked()
                 and self._round_available(in_flight=True) and not self._models_open()
                 and self._disconnect_deadline is None)
+
+    def toggle_feed_pause(self):
+        paused = not self.machine.feed_pause_requested
+        if not paused and not self._automatic_ready():
+            self.write_log('继续需要相机、串口、标定和本轮记录均就绪。')
+            return False
+        return self._command(lambda: self.machine.set_feed_paused(paused),
+                             '本件完成后暂停进料。' if paused else '继续自动分拣，等待 ESP32 请求推料。')
+
+    def return_home(self):
+        if self._closing or self._models_open() or self._disconnect_deadline is not None:
+            self.write_log('当前正在关闭或更新模型，无法移动。')
+            return False
+        return self._command(lambda: self.machine.goto(0, 0), '已请求移到已确认的 HOME (0, 0)。')
 
     def stop(self):
         self._reset_deadline = None
@@ -777,6 +887,14 @@ class LiveWindow(QMainWindow):
             token, kind, shape, getattr(detection, 'confidence', None), color_name,
             getattr(color, 'confidence', None), getattr(color, 'valid_pixels', None), result.elapsed_ms))
         self.preview.show_frame(result.preview_bgr)
+        if self.release_competition is not None:
+            self.debug_item_label.setText('货物名称：%s %s' % (color_name, self._shape_name(shape)))
+            sample = evidence.get('color_sample_bgr')
+            if sample is None:
+                self.color_view.frame = None
+                self.color_view.refresh()
+            else:
+                self.color_view.show_frame(sample)
         if kind == 'sort':
             if not self._automatic_ready() or self.machine.snapshot().state != 'recognizing':
                 self.stop()
@@ -829,6 +947,9 @@ class LiveWindow(QMainWindow):
             self._refresh_binding_display()
             if self.machine.provide_sort(bin_id):
                 self._last_sort = (shape, color_name, bin_id, result)
+                if self.release_competition is not None:
+                    self._set_current_item(shape, color_name, bin_id, self.auto_bins.total + 1)
+                    self._refresh_binding_display()
                 self.write_log('%s %s → %s号箱，等待投箱完成。' % (color_name, shape, bin_id))
             else:
                 # A deadline rejection stops locally before writing SORT.
@@ -846,7 +967,8 @@ class LiveWindow(QMainWindow):
         kind = self._take_job(token)
         if kind is None:
             return
-        self.write_log('托盘无目标' if target is None else '托盘目标 %.1f, %.1f mm' % target)
+        self._tray_status = '无目标' if target is None else '目标 %.1f, %.1f mm' % target
+        self.write_log('托盘' + self._tray_status, view=self.tray_log_view)
         if kind == 'locate':
             if not self._automatic_ready() or self.machine.snapshot().state != 'locating':
                 self.stop()
@@ -879,18 +1001,13 @@ class LiveWindow(QMainWindow):
             return
         self._last_sort = None
         total = self.auto_bins.total
-        row = self.records.rowCount()
-        self.records.insertRow(row)
-        for column, value in ((0, total), (1, '%s %s → %s号盒' % (color, self._shape_name(shape), bin_id)), (3, total)):
-            self.records.setItem(row, column, QTableWidgetItem(str(value)))
-        image = ImageView('')
-        image.setMinimumHeight(0)
-        image.setFixedHeight(64)
-        image.show_frame(result.preview_bgr)
-        self.records.setCellWidget(row, 2, image)
-        self.records.setRowHeight(row, 68)
-        if self.records.rowCount() > 200:
-            self.records.removeRow(0)
+        if self.release_competition is not None:
+            captures = (getattr(result, 'diagnostics', None) or {}).get('captures') or {}
+            frame = captures.get('right')
+            self._round_images[bin_id] = (result.preview_bgr if frame is None else frame).copy()
+            self._set_current_item(shape, color, bin_id, total)
+        else:
+            self._append_result_row(shape, color, bin_id, total, result.preview_bgr)
         self._refresh_binding_display()
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -907,6 +1024,27 @@ class LiveWindow(QMainWindow):
         if self.linux_20261107 and total >= release.ROUND_SIZE:
             self.stop()
             self.write_log('本轮 %d 件已确认投放，已结束。' % total)
+
+    def _append_result_row(self, shape, color, bin_id, total, frame):
+        row = self.records.rowCount()
+        self.records.insertRow(row)
+        for column, value in ((0, total), (1, '%s %s → %s号盒' % (color, self._shape_name(shape), bin_id)), (3, total)):
+            self.records.setItem(row, column, QTableWidgetItem(str(value)))
+        image = ImageView('')
+        image.setFixedHeight(64)
+        image.show_frame(frame)
+        self.records.setCellWidget(row, 2, image)
+        self.records.setRowHeight(row, 68)
+        if self.records.rowCount() > 200:
+            self.records.removeRow(0)
+
+    def _set_current_item(self, shape, color, bin_id, sequence):
+        name = self._shape_name(shape)
+        self._current_item = {'sequence': sequence, 'name': '%s %s' % (color, name),
+                              'bin': '%s号' % bin_id, 'count': self.auto_bins.counts[bin_id - 1],
+                              'color': color, 'shape': name}
+        self.debug_sequence_label.setText('序号：%s' % sequence)
+        self.debug_item_label.setText('货物名称：' + self._current_item['name'])
 
     def _shape_name(self, shape):
         return release.SHAPES.get(shape, shape) if self.linux_20261107 else shape
@@ -936,6 +1074,9 @@ class LiveWindow(QMainWindow):
                     and (pending['shape'], pending['color'], pending['bin']) == self._last_sort[:3])
 
     def _refresh_binding_display(self):
+        if self.release_competition is not None:
+            self._refresh_release_bins()
+            return
         if self.auto_bins is None:
             self.total_label.setText('本轮记录待检查')
             for number, label in enumerate(self.bin_labels, 1):
@@ -954,6 +1095,27 @@ class LiveWindow(QMainWindow):
                 label.setText(label.text() + '\n%s %s' % (row['color'], self._shape_name(row['shape'])))
             if pending is not None and pending['bin'] == number:
                 label.setText(label.text() + ' · 待确认')
+
+    def _refresh_release_bins(self):
+        entries = {row['bin']: row for row in self.auto_bins.entries} if self.auto_bins else {}
+        pending = self.auto_bins.pending if self.auto_bins else None
+        total = self.auto_bins.total if self.auto_bins else 0
+        bins = []
+        for number, label in enumerate(self.debug_bin_labels, 1):
+            row = entries.get(number)
+            name = '%s %s' % (row['color'], self._shape_name(row['shape'])) if row else '待绑定'
+            if self.auto_bins is None:
+                name = '待检查'
+            if pending is not None and pending['bin'] == number:
+                name += ' · 待确认'
+            count = row['count'] if row else 0
+            label.setText('%s号盒  %s  数量：%s' % (number, name, count))
+            bins.append((name, count, self._round_images.get(number)))
+        self.debug_total_label.setText('分拣成功总数量：%s' % total)
+        self._release_status = self._release_status_values(self.machine.snapshot())
+        status, serial_status, tray_status = self._release_status
+        current = dict(self._current_item, serial=serial_status, tray=tray_status)
+        self.release_competition.render(total, bins, status, current)
 
     def clear_round(self):
         if (self.machine.snapshot().state in AUTO_STATES or self.machine.pending or self._job is not None
@@ -983,7 +1145,13 @@ class LiveWindow(QMainWindow):
         self.auto_bins = session
         self._binding_error = None
         self._last_sort = None
-        self.records.setRowCount(0)
+        if self.release_competition is not None:
+            self._round_images.clear()
+            self._current_item.clear()
+            self.debug_sequence_label.setText('序号：—')
+            self.debug_item_label.setText('货物名称：—')
+        else:
+            self.records.setRowCount(0)
         self._refresh_binding_display()
         self.write_log('已开始新一轮，按形状＋颜色首次出现顺序自动分配1至6号箱。')
         return True
@@ -1099,9 +1267,13 @@ class LiveWindow(QMainWindow):
 
     def show_competition(self):
         self.pages.setCurrentWidget(self.competition_page)
+        if self.release_competition is not None:
+            self._show_competition_frames()
 
     def show_debug(self):
         self.pages.setCurrentWidget(self.debug_page)
+        if self.release_competition is not None and self._frames_at is not None:
+            self._show_debug_frames()
 
     def closeEvent(self, event):
         if not self._closing:

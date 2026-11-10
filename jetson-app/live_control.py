@@ -1,6 +1,5 @@
 """Real ESP32 protocol controller. Only received MCU events acknowledge actions."""
 import math
-import re
 import time
 from collections import deque
 
@@ -9,6 +8,8 @@ from sorter_simulation import SorterSnapshot
 
 
 MCU_STATES = {'WAIT_START', 'IDLE', 'WAIT_PUSH', 'PUSHING', 'WAIT_SORT', 'SORTING', 'STOP'}
+AUTO_STATES = {'enabling_auto', 'starting', 'running', 'locating', 'wait_scan', 'recognizing',
+               'wait_repush', 'wait_done', 'verifying_drop', 'paused'}
 
 
 def _position(x, y):
@@ -17,18 +18,21 @@ def _position(x, y):
 
 class LiveController:
     def __init__(self, send, clock=time.monotonic, timeout=30, steps_per_mm=(40, 39),
-                 verify_drop=False, scan_timeout=None):
+                 verify_drop=False, scan_timeout=None, done_timeout=None):
         if not callable(send) or not callable(clock):
             raise ValueError('send and clock must be callable')
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError('timeout must be finite and positive')
-        if scan_timeout is not None and (not math.isfinite(scan_timeout) or scan_timeout <= 0):
-            raise ValueError('scan_timeout must be finite and positive')
+        for name, value in (('scan_timeout', scan_timeout), ('done_timeout', done_timeout)):
+            if value is not None and (not math.isfinite(value) or value <= 0):
+                raise ValueError(name + ' must be finite and positive')
         if len(steps_per_mm) != 2 or any(not math.isfinite(v) or v <= 0 for v in steps_per_mm):
             raise ValueError('steps_per_mm must contain two positive finite values')
         self._send, self._clock, self._timeout = send, clock, timeout
         self._verify_drop = verify_drop
-        self._scan_timeout = scan_timeout
+        self._phase_timeouts = {state: value for state, value in
+                                (('recognizing', scan_timeout), ('wait_done', done_timeout))
+                                if value is not None}
         self._steps = tuple(steps_per_mm)
         self._connected = False
         self.ready = False
@@ -40,6 +44,7 @@ class LiveController:
         self._bin = None
         self._x = self._y = 0.0
         self._pusher_down = False
+        self._feed_pause_requested = False
         self._counts = [0] * 6
         self._log = deque(maxlen=200)
         self._last_error = None
@@ -63,6 +68,10 @@ class LiveController:
         return (self.ready and self._mcu_state in ('WAIT_START', 'STOP')
                 and self._state in ('needs_origin', 'stopped', 'armed')
                 and self._pending is None and not self._pusher_down)
+
+    @property
+    def feed_pause_requested(self):
+        return self._feed_pause_requested
 
     @property
     def request_epoch(self):
@@ -92,17 +101,18 @@ class LiveController:
     def _disarm(self, state):
         self.epoch += 1
         self._origin = False
+        self._feed_pause_requested = False
         self._pending = self._target = self._bin = None
         self._deadline = None
         self._state = state
 
     def _wait(self, state):
         self._state = state
-        duration = self._scan_timeout if state == 'recognizing' and self._scan_timeout is not None else self._timeout
+        duration = self._phase_timeouts.get(state, self._timeout)
         self._deadline = self._clock() + duration
 
     def _expired_action(self):
-        if ((self._verify_drop or self._scan_timeout is not None)
+        if ((self._verify_drop or self._phase_timeouts)
                 and self._deadline is not None and self._clock() >= self._deadline):
             self._fault('通信或动作等待超时，请检查机构后重新确认零点')
             self.ready = False
@@ -156,6 +166,14 @@ class LiveController:
         self._last_error = None
         self._wait('enabling_auto')
         return self._write('HOST_READY')
+
+    def set_feed_paused(self, paused):
+        if not self.ready or not self._origin or self._state not in AUTO_STATES:
+            return self._reject('自动分拣中才可暂停或继续进料')
+        self._feed_pause_requested = paused
+        if self._state == 'paused' and not paused:
+            self._wait('running')
+        return True
 
     def stop(self):
         self._disarm('stopped')
@@ -280,16 +298,25 @@ class LiveController:
             return self.begin_handshake()
         if line == 'PONG':
             self._got_pong = True
-        elif (len(fields) == 3 and fields[:2] == ['VERSION', 'ESP32_SORTER_XY_PUSHER']
-              and re.fullmatch(r'\d+\.\d+\.\d+', fields[2])):
+        elif len(fields) == 3 and fields[:2] == ['VERSION', 'ESP32_SORTER_XY_PUSHER']:
+            if self._state != 'handshaking':
+                return False
+            if fields[2] != '0.1.0':
+                self.disconnect('固件版本 {} 不匹配，请使用 Y 轴 39 脉冲/mm 的配套 0.1.0。'.format(fields[2]))
+                return True
             self._got_version = True
         elif fields[:2] == ['STATUS', 'MCU']:
             return self._mcu_status(fields)
         elif head == 'STATUS':
             return self._status(fields[1:])
-        elif line == 'PUSH?' and self.ready and self._origin and self._state in ('running', 'wait_repush'):
-            self.epoch += 1
-            self._wait('locating')
+        elif line == 'PUSH?' and self.ready and self._origin and self._state in ('running', 'wait_repush', 'paused'):
+            if self._feed_pause_requested:
+                self._wait('paused')
+                if not self._write('PUSH,WAIT'):
+                    return False
+            else:
+                self.epoch += 1
+                self._wait('locating')
         elif line == 'SCAN' and self.ready and self._origin and self._state == 'wait_scan':
             self.epoch += 1
             self._wait('recognizing')

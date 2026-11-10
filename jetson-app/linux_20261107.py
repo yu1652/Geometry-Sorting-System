@@ -17,6 +17,7 @@ TRAY_COMPENSATION = {'center': (80., 80.), 'span': (80., 80.),
                      'x_left': 0., 'x_right': -4., 'y_top': 6., 'y_bottom': -6.}
 SCAN_ATTEMPTS = 3
 SCAN_TIMEOUT = 5.0
+DONE_TIMEOUT = 5.0
 ROUND_SIZE = 12
 
 
@@ -31,7 +32,8 @@ def make_recognizer():
                            valid_max_value=245, valid_min_saturation=40)
     backend = create_backend(MODEL_DIR / 'shape_detector_fp16.engine', model_kind='yolo_win8')
     try:
-        return LegacyRecognizer(backend, None, CLASS_NAMES, config, expected_count=len(CLASS_NAMES))
+        return LegacyRecognizer(backend, None, CLASS_NAMES, config, expected_count=len(CLASS_NAMES),
+                                capture_color_sample=True)
     except Exception:
         backend.close()
         raise

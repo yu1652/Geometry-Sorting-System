@@ -29,6 +29,46 @@ class Linux20261107Tests(unittest.TestCase):
             self.assertEqual(create.call_args.kwargs['model_kind'], 'tray')
             self.assertEqual(create.call_args.args[0].parent.name, 'linux_20261107')
 
+    def test_release_opens_competition_with_debug_and_calibration_still_accessible(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = LiveWindow(data_dir=folder, linux_20261107=True)
+            try:
+                self.assertIs(window.pages.currentWidget(), window.competition_page)
+                self.assertIsNotNone(window.release_competition)
+                window.show_debug()
+                self.assertIs(window.pages.currentWidget(), window.debug_page)
+                self.assertIsNot(window.tray_log_view, window.serial_log_view)
+                self.assertIsNot(window.log_view, window.serial_log_view)
+                window.show_competition()
+                self.assertIs(window.pages.currentWidget(), window.competition_page)
+            finally:
+                window.close()
+
+    def test_hidden_competition_bin_refreshes_to_latest_confirmed_image(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = LiveWindow(data_dir=folder, linux_20261107=True)
+            try:
+                window.show()
+                APP.processEvents()
+                competition = window.release_competition
+                image = competition.card_tiles[0][2]
+                for total, bgr in ((1, (0, 0, 255)), (2, (255, 0, 0))):
+                    if total == 2:
+                        window.show_debug()
+                    bin_frame = np.full((24, 32, 3), bgr, np.uint8)
+                    competition.render(total, [('蓝色 五棱柱', total, bin_frame)] +
+                                       [('待绑定', 0, None)] * 5, '待机', {})
+                window.show_competition()
+                APP.processEvents()
+                self.assertEqual(image.pixmap().toImage().pixelColor(0, 0).name(), '#0000ff')
+                competition.mode_picker.setCurrentText('表格')
+                APP.processEvents()
+                self.assertEqual((competition.table.rowCount(), competition.table.columnCount()), (4, 6))
+                self.assertEqual(competition.table.item(3, 0).text(), '2')
+                self.assertEqual(competition.table_images[0].pixmap().toImage().pixelColor(0, 0).name(), '#0000ff')
+            finally:
+                window.close()
+
     def exercise_drop(self, previous_count):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

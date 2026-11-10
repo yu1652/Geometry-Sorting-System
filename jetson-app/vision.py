@@ -234,6 +234,18 @@ def tighten_box(box, mask: np.ndarray) -> Tuple[float, float, float, float]:
     )
 
 
+def color_sample_roi(frame_bgr, box, color_config):
+    x1, y1, x2, y2 = _safe_box_roi(box, frame_bgr.shape[1], frame_bgr.shape[0])
+    if x1 >= x2 or y1 >= y2:
+        return x1, y1, x2, y2
+    center_ratio = float(color_config.get('bbox_center_ratio', 1.0))
+    if not 0 < center_ratio <= 1:
+        raise ValueError('bbox_center_ratio must be in (0, 1]')
+    inset_x = int((x2 - x1) * (1 - center_ratio) / 2)
+    inset_y = int((y2 - y1) * (1 - center_ratio) / 2)
+    return x1 + inset_x, y1 + inset_y, x2 - inset_x, y2 - inset_y
+
+
 def classify_hsv(frame_bgr: np.ndarray, mask: np.ndarray, box, config) -> ColorResult:
     """Classify foreground pixels in a detection box using configured HSV ranges."""
     if not isinstance(frame_bgr, np.ndarray) or frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
@@ -250,16 +262,9 @@ def classify_hsv(frame_bgr: np.ndarray, mask: np.ndarray, box, config) -> ColorR
             if key not in color_config and key in recognition_config:
                 color_config[key] = recognition_config[key]
     unknown_name = color_config.get("unknown_color", "未知颜色")
-    x1, y1, x2, y2 = _safe_box_roi(box, frame_bgr.shape[1], frame_bgr.shape[0])
+    x1, y1, x2, y2 = color_sample_roi(frame_bgr, box, color_config)
     if x1 >= x2 or y1 >= y2:
         return ColorResult(unknown_name, 0.0, 0)
-    center_ratio = float(color_config.get('bbox_center_ratio', 1.0))
-    if not 0 < center_ratio <= 1:
-        raise ValueError('bbox_center_ratio must be in (0, 1]')
-    inset_x = int((x2 - x1) * (1 - center_ratio) / 2)
-    inset_y = int((y2 - y1) * (1 - center_ratio) / 2)
-    x1, x2 = x1 + inset_x, x2 - inset_x
-    y1, y2 = y1 + inset_y, y2 - inset_y
     selected = mask[y1:y2, x1:x2].astype(bool)
     valid_pixels = int(selected.sum())
     minimum = int(color_config["min_valid_pixels"])

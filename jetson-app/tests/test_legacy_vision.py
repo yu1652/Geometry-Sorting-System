@@ -151,6 +151,15 @@ class LegacyRecognizerTests(unittest.TestCase):
         self.assertEqual(result.color.name, "蓝色")
         self.assertEqual(result.diagnostics['class_names'], list(classes))
 
+    def test_color_preview_is_the_sample_from_the_selected_camera(self):
+        self.config['color']['bbox_center_ratio'] = .6
+        recognizer = LegacyRecognizer(FakeBackend(_raw(self.left_box, self.right_box)),
+                                      None, self.classes, self.config, capture_color_sample=True)
+        result = recognizer.recognize_pair(self.left, self.right)
+        self.assertEqual(result.detection.class_id, 25)
+        sample = result.diagnostics['color_sample_bgr']
+        np.testing.assert_array_equal(sample, self.right[96:144, 96:144])
+
     def test_win8_recognizer_rejects_26_class_output(self):
         classes = tuple("win_%d" % i for i in range(8))
         recognizer = LegacyRecognizer(FakeBackend(_raw(self.left_box)), None, classes, self.config, expected_count=8)

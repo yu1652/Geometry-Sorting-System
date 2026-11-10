@@ -12,7 +12,7 @@ import numpy as np
 
 from feature_preprocess import feature_bgr
 from vision import (
-    ColorResult, Detection, LetterboxTransform, classify_hsv, decode_yolo_raw,
+    ColorResult, Detection, LetterboxTransform, classify_hsv, color_sample_roi, decode_yolo_raw,
     letterbox_rgb, restore_surface_mask, tighten_box,
 )
 
@@ -70,12 +70,13 @@ class LegacyResult:
 class LegacyRecognizer:
     """Own the supplied backends on the thread that constructs this recognizer."""
 
-    def __init__(self, detector, segmenter, class_names, config, *, expected_count=26):
+    def __init__(self, detector, segmenter, class_names, config, *, expected_count=26, capture_color_sample=False):
         self._detector = detector
         self._segmenter = segmenter
         self._class_names = tuple(class_names)
         self._config = config
         self._expected_count = expected_count
+        self._capture_color_sample = capture_color_sample
         self._owner = threading.current_thread()
         self._closed = False
 
@@ -161,8 +162,15 @@ class LegacyRecognizer:
             if candidates and not preprocessed:
                 detection = candidates[0][0]
                 source = 'mask' if mask is not None else 'box'
-                colors.append((classify_hsv(half, mask if mask is not None else full_roi,
-                                            surface_box or box, self._config), detection.confidence))
+                color_roi = surface_box or box
+                foreground = mask if mask is not None else full_roi
+                sample = None
+                color_result = classify_hsv(half, foreground, color_roi, self._config)
+                if self._capture_color_sample and color_result.valid_pixels:
+                    x1, y1, x2, y2 = color_sample_roi(half, color_roi, self._config.get('color', self._config))
+                    sample = half[y1:y2, x1:x2].copy()
+                    sample[~foreground[y1:y2, x1:x2]] = 0
+                colors.append((color_result, detection.confidence, sample))
             color_sources.append(source)
 
         color = None
@@ -170,7 +178,9 @@ class LegacyRecognizer:
             unknown = self._config.get("color", self._config).get(
                 "unknown_color", self._config.get("recognition", {}).get("unknown_color", "\u672a\u77e5\u989c\u8272")
             )
-            color, _ = max(colors, key=lambda item: (item[0].name != unknown, item[0].confidence, item[1]))
+            color, _, sample = max(colors, key=lambda item: (item[0].name != unknown, item[0].confidence, item[1]))
+            if sample is not None:
+                diagnostics['color_sample_bgr'] = sample
 
         for side, surface_box in enumerate(surface_boxes):
             if surface_box is not None:

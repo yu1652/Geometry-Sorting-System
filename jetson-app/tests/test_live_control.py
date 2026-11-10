@@ -47,6 +47,18 @@ class LiveControllerTests(unittest.TestCase):
         self.assertTrue(self.control.ready)
         self.assertFalse(self.control.snapshot().origin_confirmed)
 
+    def test_replaced_40_step_firmware_cannot_arm_39_step_console(self):
+        self.control.begin_handshake()
+        self.control.handle_mcu('PONG')
+        self.control.handle_mcu('VERSION,ESP32_SORTER_XY_PUSHER,0.1.1')
+        self.control.handle_mcu('STATUS,MCU,WAIT_START,0,0,123')
+        self.assertFalse(self.control.ready)
+        self.assertFalse(self.control.connected)
+        self.assertIn('0.1.0', self.control.snapshot().last_error)
+        self.assertFalse(self.control.confirm_origin())
+        self.assertFalse(self.control.start())
+        self.assertEqual(self.sent, ['PING', 'VERSION?', 'STATUS?'])
+
     def test_no_motion_before_confirmed_origin_and_real_reset_ack(self):
         self.assertFalse(self.control.confirm_origin())
         self.assertFalse(self.control.start())
@@ -171,6 +183,44 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(self.sent, before)
         self.assertTrue(self.control.handle_mcu('PUSH?'))
         self.assertEqual(self.control.snapshot().state, 'locating')
+
+    def test_pause_waits_for_current_confirmed_drop_and_resumes_with_new_push_request(self):
+        self.control = LiveController(self.sent.append, clock=lambda: self.now, verify_drop=True)
+        self.start_running()
+        self.control.handle_mcu('PUSH?')
+        self.control.provide_target(80, 80)
+        self.control.handle_mcu('SCAN')
+        self.assertTrue(self.control.set_feed_paused(True))
+        self.assertTrue(self.control.provide_sort(1))
+        self.control.handle_mcu('DONE')
+        before = len(self.sent)
+        self.assertFalse(self.control.handle_mcu('PUSH?'))
+        self.assertEqual(len(self.sent), before)
+        self.assertTrue(self.control.confirm_drop(self.control.request_epoch))
+        self.assertTrue(self.control.handle_mcu('PUSH?'))
+        self.assertEqual(self.sent[-1], 'PUSH,WAIT')
+        self.assertEqual(self.control.snapshot().state, 'paused')
+        self.assertTrue(self.control.snapshot().origin_confirmed)
+        self.assertTrue(self.control.set_feed_paused(False))
+        self.assertEqual(self.control.snapshot().state, 'running')
+        self.assertTrue(self.control.handle_mcu('PUSH?'))
+        self.assertEqual(self.control.snapshot().state, 'locating')
+        self.assertEqual(self.control.snapshot().completed_count, 1)
+        self.control.stop()
+        self.assertFalse(self.control.feed_pause_requested)
+
+    def test_release_done_deadline_does_not_count_a_late_drop(self):
+        self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                      verify_drop=True, scan_timeout=5, done_timeout=5)
+        self.start_running()
+        self.control.handle_mcu('PUSH?')
+        self.control.provide_target(80, 80)
+        self.control.handle_mcu('SCAN')
+        self.assertTrue(self.control.provide_sort(1))
+        self.now = 5
+        self.assertFalse(self.control.handle_mcu('DONE'))
+        self.assertEqual(self.sent[-2:], ['STOP', 'STATUS?'])
+        self.assertEqual(self.control.snapshot().completed_count, 0)
 
     def test_drop_verification_requires_fresh_epoch_and_expires(self):
         self.control = LiveController(self.sent.append, clock=lambda: self.now,

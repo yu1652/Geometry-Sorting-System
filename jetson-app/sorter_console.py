@@ -9,10 +9,10 @@ from app import QApplication, ImageView, QDialog, QHBoxLayout, QLabel, QMainWind
 
 try:
     from PySide6.QtCore import QLocale
-    from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFileDialog, QHeaderView, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTextEdit
+    from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHeaderView, QScrollArea, QSizePolicy, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTextEdit
 except ImportError:
     from PyQt5.QtCore import QLocale
-    from PyQt5.QtWidgets import QComboBox, QDoubleSpinBox, QFileDialog, QHeaderView, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTextEdit
+    from PyQt5.QtWidgets import QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHeaderView, QScrollArea, QSizePolicy, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTextEdit
 
 import cv2
 import numpy as np
@@ -164,38 +164,32 @@ class CoordinateDelegate(QStyledItemDelegate):
 
 
 class CalibrationDialog(QDialog):
+    frame_labels = ('框 X', '框 Y', '框宽', '框高')
+
     def __init__(self, console, rows):
         super().__init__(console)
         self.console = console
         self.simulation = getattr(console, 'simulation_mode', True)
+        self.release_layout = getattr(console, 'linux_20261107', False)
         settings = normalize_frame_settings(getattr(console, 'calibration_frame', None))
         self.setWindowTitle("XY 九点标定 · 仿真" if self.simulation else "XY 九点标定 · 实机")
-        self.resize(1000, 550)
+        size = (1024, 600) if self.release_layout else (1000, 550)
+        self.resize(*size)
         outer = QVBoxLayout(self)
-        frame_bar = QHBoxLayout()
-        outer.addLayout(frame_bar)
         self.frame_fields = []
-        for label, value in zip(('框 X', '框 Y', '框宽', '框高'), settings['box']):
-            frame_bar.addWidget(QLabel(label))
+        for value in settings['box']:
             editor = QDoubleSpinBox()
             editor.setLocale(QLocale.c())
             editor.setDecimals(2)
             editor.setRange(0, 639)
             editor.setSingleStep(1)
             editor.setValue(value)
-            frame_bar.addWidget(editor)
             self.frame_fields.append(editor)
-        frame_bar.addWidget(QLabel('九点内缩'))
         self.frame_inset = QDoubleSpinBox()
         self.frame_inset.setRange(0, 45)
         self.frame_inset.setSuffix('%')
         self.frame_inset.setValue(settings['inset_percent'])
-        frame_bar.addWidget(self.frame_inset)
-        frame_bar.addWidget(button('按框生成九点', self.generate_points))
-        work = QHBoxLayout()
-        outer.addLayout(work, 1)
         self.view = CalibrationFrameView(settings['box'], self.set_frame)
-        work.addWidget(panel('标定框 · 框内拖动平移 / 四角缩放 / 框外重画', self.view), 1)
         self.points = QTableWidget(9, 5)
         self.points.setHorizontalHeaderLabels(("点位", "像素 X", "像素 Y", "机械 X/mm", "机械 Y/mm"))
         self.points.setItemDelegate(CoordinateDelegate(self.points))
@@ -209,22 +203,13 @@ class CalibrationDialog(QDialog):
         self.set_rows(rows)
         self.points.currentCellChanged.connect(self.draw_points)
         self.points.itemChanged.connect(self.draw_points)
-        work.addWidget(self.points, 1)
         self.status = QLabel(f'机械范围 X 0–{X_MAX_MM:g}、Y 0–{Y_MAX_MM:g} mm；修改后请点保存标定。'
                              '测试动作前需确认零点。')
         self.status.setWordWrap(True)
-        outer.addWidget(self.status)
-        controls = QHBoxLayout()
-        controls.addWidget(button("GOTO 选中点", self.goto_selected))
-        lift = QPushButton("按住下降对点")
-        lift.pressed.connect(lambda: self.move_pusher(True))
-        lift.released.connect(lambda: self.move_pusher(False))
-        controls.addWidget(lift)
-        controls.addWidget(button("抬起", lambda: self.move_pusher(False)))
-        controls.addWidget(button("导入旧标定", self.open_legacy))
-        controls.addWidget(button("保存标定", self.save_points))
-        controls.addWidget(button("关闭", self.reject))
-        outer.addLayout(controls)
+        if self.release_layout:
+            self._build_release_layout(outer, rows[0][3:])
+        else:
+            self._build_legacy_layout(outer)
         self.points.setCurrentCell(0, 1)
         self.set_frame(settings['box'])
         for editor in self.frame_fields:
@@ -234,6 +219,146 @@ class CalibrationDialog(QDialog):
         self.preview_timer.timeout.connect(self.draw_points)
         self.preview_timer.start(150)
         self.draw_points()
+
+    def _add_pusher_controls(self, layout):
+        lift = QPushButton('按住下降对点')
+        lift.pressed.connect(lambda: self.move_pusher(True))
+        lift.released.connect(lambda: self.move_pusher(False))
+        layout.addWidget(lift)
+        layout.addWidget(button('抬起', lambda: self.move_pusher(False)))
+
+    def _build_legacy_layout(self, outer):
+        frame_bar = QHBoxLayout()
+        outer.addLayout(frame_bar)
+        for label, editor in zip(self.frame_labels, self.frame_fields):
+            frame_bar.addWidget(QLabel(label))
+            frame_bar.addWidget(editor)
+        frame_bar.addWidget(QLabel('九点内缩'))
+        frame_bar.addWidget(self.frame_inset)
+        frame_bar.addWidget(button('按框生成九点', self.generate_points))
+        work = QHBoxLayout()
+        outer.addLayout(work, 1)
+        work.addWidget(panel('标定框 · 框内拖动平移 / 四角缩放 / 框外重画', self.view), 1)
+        work.addWidget(self.points, 1)
+        outer.addWidget(self.status)
+        controls = QHBoxLayout()
+        controls.addWidget(button('GOTO 选中点', self.goto_selected))
+        self._add_pusher_controls(controls)
+        controls.addWidget(button('导入旧标定', self.open_legacy))
+        controls.addWidget(button('保存标定', self.save_points))
+        controls.addWidget(button('关闭', self.reject))
+        outer.addLayout(controls)
+
+    def _build_release_layout(self, outer, initial_xy):
+        from linux_20261107 import TRAY_ROI as detection_roi
+
+        self.setStyleSheet('''
+            QGroupBox {background:white;border:1px solid #d6e0e9;border-radius:5px;
+                       margin-top:7px;padding-top:4px;}
+            QGroupBox::title {subcontrol-origin:margin;left:8px;padding:0 3px;color:#526a7d;}
+            QScrollArea {border:0;}
+            QPushButton {padding:3px 6px;min-height:17px;}
+        ''')
+        work = QHBoxLayout()
+        outer.addLayout(work, 1)
+        ignored = getattr(QSizePolicy, 'Policy', QSizePolicy).Ignored
+        self.view.setSizePolicy(ignored, ignored)
+        work.addWidget(panel('托盘俯拍标定图 · 框内拖动 / 四角缩放 / 框外重画', self.view), 9)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(410)
+        right = QWidget()
+        groups = QVBoxLayout(right)
+        groups.setContentsMargins(0, 0, 2, 0)
+        groups.setSpacing(4)
+        scroll.setWidget(right)
+        work.addWidget(scroll, 10)
+
+        frame_box = QGroupBox('托盘框')
+        fields = QGridLayout(frame_box)
+        for index, (label, editor) in enumerate(zip(self.frame_labels, self.frame_fields)):
+            row, column = divmod(index, 2)
+            fields.addWidget(QLabel(label), row, column * 2)
+            fields.addWidget(editor, row, column * 2 + 1)
+        fields.addWidget(QLabel('九点内缩'), 2, 0)
+        fields.addWidget(self.frame_inset, 2, 1)
+        fields.addWidget(button('按框生成九点', self.generate_points), 2, 2, 1, 2)
+        roi = QLabel('自动定位范围（只读）  X {} · Y {} · 宽 {} · 高 {} px'.format(*detection_roi))
+        roi.setObjectName('muted')
+        roi.setWordWrap(True)
+        fields.addWidget(roi, 3, 0, 1, 4)
+        groups.addWidget(frame_box)
+
+        actions_box = QGroupBox('动作测试')
+        actions = QVBoxLayout(actions_box)
+        test_values = QHBoxLayout()
+        self.test_x = self._millimetre_input(X_MAX_MM, initial_xy[0])
+        self.test_y = self._millimetre_input(Y_MAX_MM, initial_xy[1])
+        for label, editor in (('测试 X', self.test_x), ('测试 Y', self.test_y)):
+            test_values.addWidget(QLabel(label))
+            test_values.addWidget(editor, 1)
+        actions.addLayout(test_values)
+        motion = QHBoxLayout()
+        motion.addWidget(button('GOTO 测试坐标', self.goto_test))
+        home = button('回 HOME', lambda: self._goto(0, 0, '回已确认的机械零点'))
+        home.setToolTip('移动到已确认的机械坐标 (0, 0)。请先手动对零并确认。')
+        motion.addWidget(home)
+        self._add_pusher_controls(motion)
+        actions.addLayout(motion)
+        groups.addWidget(actions_box)
+
+        points_box = QGroupBox('九点坐标')
+        points_layout = QVBoxLayout(points_box)
+        point_actions = QHBoxLayout()
+        point_actions.addWidget(button('GOTO 选中点', self.goto_selected))
+        point_actions.addWidget(button('测试 X/Y 写回当前点', self.write_test_point))
+        point_actions.addWidget(button('下一点', self.next_point))
+        points_layout.addLayout(point_actions)
+        shift = QHBoxLayout()
+        shift.addWidget(QLabel('平移步长'))
+        self.shift_step = self._millimetre_input(X_MAX_MM, 1, minimum=0.001)
+        shift.addWidget(self.shift_step, 1)
+        for label, (x, y) in (('X-', (-1, 0)), ('X+', (1, 0)), ('Y-', (0, -1)), ('Y+', (0, 1))):
+            shift.addWidget(button(label, lambda _, x=x, y=y: self.shift_points(
+                x * self.shift_step.value(), y * self.shift_step.value())))
+        self.undo_shift = button('撤销平移', self.undo_translation)
+        shift.addWidget(self.undo_shift)
+        points_layout.addLayout(shift)
+        self.shift_summary = QLabel()
+        self.shift_summary.setObjectName('muted')
+        points_layout.addWidget(self.shift_summary)
+        self._set_translation(0.0, 0.0)
+        self.points.verticalHeader().setMinimumSectionSize(19)
+        self.points.verticalHeader().setDefaultSectionSize(21)
+        self.points.setMinimumHeight(211)
+        points_layout.addWidget(self.points, 1)
+        groups.addWidget(points_box, 1)
+
+        save_box = QGroupBox('保存')
+        footer = QHBoxLayout(save_box)
+        footer.addWidget(self.status, 1)
+        footer.addWidget(button('导入旧标定', self.open_legacy))
+        save = button('保存标定', self.save_points)
+        save.setObjectName('go')
+        footer.addWidget(save)
+        footer.addWidget(button('关闭', self.reject))
+        outer.addWidget(save_box)
+        for layout in (fields, actions, points_layout, footer):
+            layout.setContentsMargins(8, 4, 8, 6)
+            layout.setSpacing(4)
+        for control in self.findChildren(QPushButton):
+            control.setAutoDefault(False)
+
+    @staticmethod
+    def _millimetre_input(maximum, value, minimum=0):
+        editor = QDoubleSpinBox()
+        editor.setLocale(QLocale.c())
+        editor.setDecimals(3)
+        editor.setRange(minimum, maximum)
+        editor.setSingleStep(0.1)
+        editor.setSuffix(' mm')
+        editor.setValue(value)
+        return editor
 
     def set_frame(self, box):
         box = validate_frame(box)
@@ -287,6 +412,9 @@ class CalibrationDialog(QDialog):
             for row in range(9):
                 for column in range(1, 5):
                     self.points.openPersistentEditor(self.points.item(row, column))
+            if self.release_layout:
+                for editor in self.points.findChildren(CoordinateSpinBox):
+                    editor.lineEdit().deselect()
         finally:
             self.points.blockSignals(blocked)
 
@@ -303,6 +431,8 @@ class CalibrationDialog(QDialog):
             self.status.setText(f"导入失败：{exc}")
             return
         self.set_rows(rows)
+        if self.release_layout:
+            self._set_translation(0.0, 0.0)
         self.draw_points()
         self.status.setText("已导入草稿；请检查后保存。")
 
@@ -332,10 +462,70 @@ class CalibrationDialog(QDialog):
             if row < 0:
                 raise ValueError("请选择一个标定点")
             name, _, _, x, y = calibration_rows(self.points)[row]
-            self.console._command(lambda: self.console.machine.goto(x, y), f"GOTO {name} → {x:.1f}, {y:.1f} mm")
+            self._goto(x, y, f"GOTO {name} → {x:.1f}, {y:.1f} mm")
+        except (AttributeError, ValueError, RuntimeError) as exc:
+            self.status.setText(str(exc))
+
+    def _goto(self, x, y, description):
+        try:
+            self.console._command(lambda: self.console.machine.goto(x, y), description)
             self.status.setText(self.console.statusBar().currentMessage())
         except (AttributeError, ValueError, RuntimeError) as exc:
             self.status.setText(str(exc))
+
+    def goto_test(self):
+        x, y = self.test_x.value(), self.test_y.value()
+        self._goto(x, y, f'GOTO 测试坐标 → {x:.3f}, {y:.3f} mm')
+
+    def write_test_point(self):
+        row = self.points.currentRow()
+        if row < 0:
+            self.status.setText('请选择一个标定点')
+            return
+        self._write_machine_points([(row, self.test_x.value(), self.test_y.value())])
+        self.status.setText(f'测试坐标已写入 P{row + 1} 草稿。')
+
+    def next_point(self):
+        row = self.points.currentRow() + 1
+        if row < self.points.rowCount():
+            column = max(1, self.points.currentColumn())
+            self.points.setCurrentCell(row, column)
+            self.points.scrollToItem(self.points.item(row, column))
+
+    def _write_machine_points(self, updates):
+        blocked = self.points.blockSignals(True)
+        try:
+            for row, x, y in updates:
+                self.points.item(row, 3).setText(f'{x:.6f}')
+                self.points.item(row, 4).setText(f'{y:.6f}')
+        finally:
+            self.points.blockSignals(blocked)
+        self.draw_points()
+
+    def _set_translation(self, x, y):
+        self._translation = (x, y)
+        self.shift_summary.setText(f'累计平移 X {x:+g} · Y {y:+g} mm（草稿）')
+        self.undo_shift.setEnabled(x != 0 or y != 0)
+
+    def shift_points(self, dx, dy, *, message='已平移九点机械坐标草稿。'):
+        try:
+            updates = []
+            for row, (name, _, _, x, y) in enumerate(calibration_rows(self.points)):
+                x, y = round(x + dx, 6), round(y + dy, 6)
+                if not position_in_machine(x, y):
+                    raise ValueError(f'{name} 平移后超出机械行程，九点保持原值。')
+                updates.append((row, x, y))
+            self._write_machine_points(updates)
+        except ValueError as exc:
+            self.status.setText(str(exc))
+            return
+        x, y = self._translation
+        self._set_translation(round(x + dx, 6), round(y + dy, 6))
+        self.status.setText(message)
+
+    def undo_translation(self):
+        x, y = self._translation
+        self.shift_points(-x, -y, message='已撤销累计平移。')
 
     def move_pusher(self, down):
         try:
