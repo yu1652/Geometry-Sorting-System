@@ -167,5 +167,19 @@ class AutoBinSession:
         state['pending'] = None
         self._persist(state)
 
+    def cancel_unsent(self, bin_id, *, new_binding):
+        """Undo a reservation only after the caller knows SORT was never sent."""
+        pending = self._state['pending']
+        if type(bin_id) is not int or pending is None or pending['bin'] != bin_id:
+            raise ValueError('Cancellation does not match the pending reservation')
+        state = copy.deepcopy(self._state)
+        if new_binding:
+            entry = state['entries'][-1]
+            if entry['bin'] != bin_id or entry['count'] != 0:
+                raise ValueError('Only the newest unused bin can be released')
+            state['entries'].pop()
+        state['pending'] = None
+        self._persist(state)
+
     def clear(self):
         self._persist(self._empty_state())

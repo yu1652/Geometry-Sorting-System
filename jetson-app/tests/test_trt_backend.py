@@ -408,6 +408,31 @@ class BackendContractTests(unittest.TestCase):
                     TensorRTBackend(b"engine", "yolo_legacy", FakeTrt(engine), FakeCuda(events))
                 self.assertFalse(any(event[0] == "malloc" for event in events))
 
+    def test_win8_engine_uses_fixed_640_input_and_8_class_output(self):
+        from trt_backend import TensorRTBackend
+
+        events = []
+        input_shape, output_shape = (1, 3, 640, 640), (1, 12, 8400)
+        engine = FakeEngine(events, input_shape=input_shape, output_shape=output_shape)
+        backend = TensorRTBackend(b"engine", "yolo_win8", FakeTrt(engine), FakeCuda(events))
+        self.addCleanup(backend.close)
+        self.assertEqual(backend.infer(np.zeros(input_shape, dtype=np.float32)).shape, output_shape)
+
+    def test_win8_engine_rejects_mismatched_input_or_output_contract_before_allocating(self):
+        from trt_backend import EngineContractError, TensorRTBackend
+
+        for kind, input_shape, output_shape in (
+            ("yolo_win8", (1, 3, 320, 320), (1, 12, 8400)),
+            ("yolo_win8", (1, 3, 640, 640), (1, 30, 8400)),
+            ("yolo_legacy", (1, 3, 640, 640), (1, 12, 8400)),
+        ):
+            with self.subTest(kind=kind, input_shape=input_shape, output_shape=output_shape):
+                events = []
+                engine = FakeEngine(events, input_shape=input_shape, output_shape=output_shape)
+                with self.assertRaisesRegex(EngineContractError, "unexpected YOLO (input|output) shape"):
+                    TensorRTBackend(b"engine", kind, FakeTrt(engine), FakeCuda(events))
+                self.assertFalse(any(event[0] == "malloc" for event in events))
+
     def test_yolo_requires_images_input_binding_name(self):
         from trt_backend import EngineContractError, TensorRTBackend
 

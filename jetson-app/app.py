@@ -263,8 +263,9 @@ class ModelDialog(QDialog):
 
 class Window(QMainWindow):
 
-    def __init__(self, recognizer_factory=None):
+    def __init__(self, recognizer_factory=None, *, linux_20261107=False):
         super().__init__()
+        self.linux_20261107 = linux_20261107
         self.setWindowTitle('YLERS · Jetson Xavier NX 视觉操作台 — 离线版')
         self.resize(1024, 600)
         self.setMinimumSize(1024, 600)
@@ -600,13 +601,16 @@ class Window(QMainWindow):
         form.addRow('媒体布局', combo)
         form.addRow('目标平台', QLabel('Jetson Xavier NX / JetPack 5（板端实测待完成）'))
         form.addRow('相机 / 串口', QLabel('未连接 / 机械输出关闭'))
-        form.addRow('形状 / 掩膜模型', QLabel('侧视：26 类旧模型；覆膜默认关闭，候选模型须试跑并确认'))
+        model_description = ('Linux 20261107 · 八类形状模型' if self.linux_20261107 else
+                             '侧视：26 类旧模型；候选模型须试跑并确认')
+        form.addRow('形状 / 掩膜模型', QLabel(model_description))
         path_label = QLabel(str(ROOT/'data/samples'))
         path_label.setWordWrap(True)
         form.addRow('样本保存目录', path_label)
-        model_button = QPushButton('模型管理')
-        model_button.clicked.connect(lambda: ModelDialog(self).exec() if not self.model_busy and self.active_request_id is None else None)
-        form.addRow('模型', model_button)
+        if not self.linux_20261107:
+            model_button = QPushButton('模型管理')
+            model_button.clicked.connect(lambda: ModelDialog(self).exec() if not self.model_busy and self.active_request_id is None else None)
+            form.addRow('模型', model_button)
         tabs.addTab(page, '设置')
         log = QTextEdit()
         log.setReadOnly(True)
@@ -655,12 +659,17 @@ def main():
     parser = argparse.ArgumentParser(description='Xavier NX视觉操作台：离线媒体回放')
     parser.add_argument('--file', type=Path)
     parser.add_argument('--fullscreen', action='store_true')
+    parser.add_argument('--linux-20261107', action='store_true', help='使用新版 Linux 8 类模型')
     input_type = parser.add_mutually_exclusive_group()
     input_type.add_argument('--preprocessed', action='store_true', help='输入为已处理的 640×320 双摄特征拼图')
     input_type.add_argument('--raw', action='store_true', help='强制使用原始彩色双摄图，覆盖保存的输入类型')
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
-    window = Window()
+    if args.linux_20261107:
+        from linux_20261107 import make_recognizer
+        window = Window(make_recognizer, linux_20261107=True)
+    else:
+        window = Window()
     saved = ROOT/'data/ui_settings.json'
     if saved.exists():
         try:

@@ -55,6 +55,18 @@ class AutoBinSessionTests(unittest.TestCase):
         self.assertIsNone(self.session.pending)
         self.assertEqual(self.finish('circle', 'red'), 1)
 
+    def test_unsent_reservation_cancellation_keeps_counts_and_releases_new_bin(self):
+        first = self.finish('circle', 'red')
+        self.assertEqual(self.session.reserve('circle', 'red'), first)
+        self.session.cancel_unsent(first, new_binding=False)
+        second = self.session.reserve('square', 'blue')
+        self.session.cancel_unsent(second, new_binding=True)
+        recovered = self.reload()
+        self.assertIsNone(recovered.pending)
+        self.assertEqual(recovered.bindings, {('circle', 'red'): 1})
+        self.assertEqual(recovered.total, 1)
+        self.assertEqual(recovered.reserve('triangle', 'red'), 2)
+
     def test_reservation_is_durable_pending_and_only_matching_complete_counts(self):
         self.assertEqual(self.session.reserve('circle', 'red'), 1)
         recovered = self.reload()

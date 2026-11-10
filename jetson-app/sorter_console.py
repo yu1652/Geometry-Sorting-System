@@ -35,13 +35,14 @@ DEFAULT_POINTS = [
 TRAY_ROI = (154, 35, 379, 380)
 
 
-def fit_calibration(rows):
+def fit_calibration(rows, *, roi=TRAY_ROI, physical_region=MACHINE_REGION):
     if any(not position_in_machine(x, y) for _, _, _, x, y in rows):
         raise ValueError(f'机械坐标须在 X 0–{X_MAX_MM:g}、Y 0–{Y_MAX_MM:g} mm 范围内')
+    left, top, width, height = roi
     return XYCalibration.fit(
         [CalibrationPoint(px, py, x, y) for _, px, py, x, y in rows],
-        pixel_region=(154, 35, 533, 415),
-        physical_region=MACHINE_REGION,
+        pixel_region=(left, top, left + width, top + height),
+        physical_region=physical_region,
     )
 
 
@@ -74,8 +75,8 @@ def calibration_rows(table):
 
 def legacy_rows(path):
     data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("version") != 2 or data.get("unit") != "mm":
-        raise ValueError("请选择旧版 v2 毫米标定文件")
+    if not isinstance(data, dict) or data.get("version") not in (2, 3) or data.get("unit") != "mm":
+        raise ValueError("请选择 v2 或 v3 毫米标定文件")
     try:
         points = data["points"]
         by_id = {point["id"]: point for point in points}
@@ -84,12 +85,15 @@ def legacy_rows(path):
             raise ValueError("标定文件须包含 P1 至 P9 各一个")
         rows = []
         for name in ids:
-            px, py = map(float, by_id[name]["pixel"])
-            x, y = map(float, by_id[name]["machine"])
+            pixel, machine = by_id[name]['pixel'], by_id[name]['machine']
+            if not isinstance(pixel, list) or not isinstance(machine, list):
+                raise ValueError(f'{name} 须包含像素 X/Y 和机械 X/Y')
+            px, py = map(float, pixel)
+            x, y = map(float, machine)
             if not (0 <= px < 640 and 0 <= py < 480 and position_in_machine(x, y)):
                 raise ValueError(f'{name} 超出画幅或机械行程：X 0–{X_MAX_MM:g}、Y 0–{Y_MAX_MM:g} mm')
             rows.append((name, px, py, x, y))
-    except (KeyError, TypeError) as exc:
+    except (KeyError, TypeError, OverflowError) as exc:
         raise ValueError("旧版标定点字段不完整") from exc
     fit_calibration(rows)
     return rows

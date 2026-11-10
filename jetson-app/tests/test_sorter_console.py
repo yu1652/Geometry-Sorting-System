@@ -137,6 +137,47 @@ class SimulationConsoleTests(unittest.TestCase):
         self.assertEqual(rows[2][3], 182)
         self.assertEqual(rows[8][4], 176)
 
+    def test_import_windows_v3_points_and_fit_the_profile_detection_roi(self):
+        from sorter_console import fit_calibration, legacy_rows
+
+        # Coordinates from the 20261107 Windows calibration export. Its helper
+        # tray rectangle differs from the configured automatic detection ROI.
+        source = self.calibration_path.with_suffix('.yaml')
+        source.write_text('''version: 3
+unit: mm
+tray_roi: [58, 5, 469, 469]
+points:
+  - {id: P1, pixel: [126, 77], machine: [85, 26]}
+  - {id: P2, pixel: [292, 79], machine: [141, 26]}
+  - {id: P3, pixel: [457, 77], machine: [196, 26]}
+  - {id: P4, pixel: [130, 244], machine: [85, 81]}
+  - {id: P5, pixel: [294, 244], machine: [141, 81]}
+  - {id: P6, pixel: [454, 243], machine: [197, 82]}
+  - {id: P7, pixel: [132, 406], machine: [85, 136]}
+  - {id: P8, pixel: [294, 405], machine: [142, 136]}
+  - {id: P9, pixel: [454, 405], machine: [197, 137]}
+''', encoding='utf8')
+        rows = legacy_rows(source)
+        self.assertEqual(rows[0], ('P1', 126, 77, 85, 26))
+        with self.assertRaisesRegex(ValueError, 'pixel outside safe region'):
+            fit_calibration(rows).map_pixel(126, 77)
+        mapping = fit_calibration(rows, roi=(16, 0, 519, 479),
+                                  physical_region=(43.563, 0.125, 226.331, 164.027))
+        self.assertEqual(tuple(mapping.pixel_region), (16, 0, 535, 479))
+        x, y = mapping.map_pixel(126, 77)
+        self.assertAlmostEqual(x, 85, delta=0.5)
+        self.assertAlmostEqual(y, 26, delta=0.5)
+        with self.assertRaisesRegex(ValueError, 'position outside physical region'):
+            mapping.validate_physical(227, 80)
+
+        before = self.window.machine.snapshot()
+        dialog = self.window.create_calibration_dialog()
+        self.addCleanup(self.dispose, dialog)
+        dialog.import_points(source)
+        self.assertEqual(float(dialog.points.item(0, 1).text()), 126)
+        self.assertFalse(self.calibration_path.exists())
+        self.assertEqual(self.window.machine.snapshot(), before)
+
     def test_legacy_import_is_draft_until_saved(self):
         import yaml
         from sorter_console import DEFAULT_POINTS

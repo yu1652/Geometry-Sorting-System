@@ -147,6 +147,169 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(self.control.snapshot().completed_count, 1)
         self.assertEqual(self.control.snapshot().bin_counts, (0, 1, 0, 0, 0, 0))
 
+    def test_optional_drop_verification_holds_push_and_counts_once(self):
+        self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                      timeout=30, verify_drop=True)
+        self.start_running()
+        self.control.handle_mcu('PUSH?')
+        self.control.provide_target(100, 50)
+        self.control.handle_mcu('SCAN')
+        self.control.provide_sort(2)
+        before = list(self.sent)
+        self.assertTrue(self.control.handle_mcu('DONE'))
+        epoch = self.control.request_epoch
+        self.assertEqual(self.control.snapshot().state, 'verifying_drop')
+        self.assertEqual(self.control.snapshot().completed_count, 0)
+        self.assertFalse(self.control.handle_mcu('DONE'))
+        self.assertFalse(self.control.handle_mcu('PUSH?'))
+        self.assertEqual(self.sent, before)
+        self.assertEqual(self.control.request_epoch, epoch)
+        self.assertTrue(self.control.confirm_drop(epoch))
+        self.assertFalse(self.control.confirm_drop(epoch))
+        self.assertEqual(self.control.snapshot().bin_counts, (0, 1, 0, 0, 0, 0))
+        self.assertEqual(self.control.snapshot().state, 'running')
+        self.assertEqual(self.sent, before)
+        self.assertTrue(self.control.handle_mcu('PUSH?'))
+        self.assertEqual(self.control.snapshot().state, 'locating')
+
+    def test_drop_verification_requires_fresh_epoch_and_expires(self):
+        self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                      timeout=30, verify_drop=True)
+        self.start_running()
+        self.control.handle_mcu('PUSH?')
+        self.control.provide_target(100, 50)
+        self.control.handle_mcu('SCAN')
+        stale_epoch = self.control.request_epoch
+        self.control.provide_sort(2)
+        self.now = 29
+        self.control.handle_mcu('DONE')
+        self.assertFalse(self.control.confirm_drop(stale_epoch))
+        self.assertEqual(self.control.snapshot().completed_count, 0)
+        self.now = 31
+        self.control.tick()
+        self.assertEqual(self.control.snapshot().state, 'verifying_drop')
+        self.now = 60
+        self.control.tick()
+        self.assertFalse(self.control.confirm_drop(self.control.request_epoch))
+        self.assertEqual(self.control.snapshot().completed_count, 0)
+        self.assertFalse(self.control.snapshot().origin_confirmed)
+
+    def test_previous_drop_epoch_cannot_confirm_next_drop(self):
+        self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                      timeout=30, verify_drop=True)
+        self.start_running()
+        for bin_id in (2, 3):
+            self.control.handle_mcu('PUSH?')
+            self.control.provide_target(100, 50)
+            self.control.handle_mcu('SCAN')
+            self.control.provide_sort(bin_id)
+            self.control.handle_mcu('DONE')
+            if bin_id == 2:
+                previous_epoch = self.control.request_epoch
+                self.assertTrue(self.control.confirm_drop(previous_epoch))
+        self.assertFalse(self.control.confirm_drop(previous_epoch))
+        self.assertEqual(self.control.snapshot().completed_count, 1)
+        self.assertTrue(self.control.confirm_drop(self.control.request_epoch))
+        self.assertEqual(self.control.snapshot().bin_counts, (0, 1, 1, 0, 0, 0))
+
+    def test_drop_verification_invalidated_by_stop_boot_and_error(self):
+        for invalidation in ('stop', 'BOOT,124', 'ERROR,AXIS'):
+            with self.subTest(invalidation=invalidation):
+                self.setUp()
+                self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                              timeout=30, verify_drop=True)
+                self.start_running()
+                self.control.handle_mcu('PUSH?')
+                self.control.provide_target(100, 50)
+                self.control.handle_mcu('SCAN')
+                self.control.provide_sort(2)
+                self.control.handle_mcu('DONE')
+                epoch = self.control.request_epoch
+                if invalidation == 'stop':
+                    self.control.stop()
+                else:
+                    self.control.handle_mcu(invalidation)
+                self.assertFalse(self.control.confirm_drop(epoch))
+                self.assertEqual(self.control.snapshot().completed_count, 0)
+
+    def test_optional_scan_timeout_only_applies_to_recognizing(self):
+        self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                      timeout=30, scan_timeout=5)
+        self.start_running()
+        self.control.handle_mcu('PUSH?')
+        self.control.provide_target(100, 50)
+        self.now = 10
+        self.control.handle_mcu('SCAN')
+        self.now = 14
+        self.control.tick()
+        self.assertEqual(self.control.snapshot().state, 'recognizing')
+        self.now = 15
+        self.control.tick()
+        self.assertFalse(self.control.snapshot().origin_confirmed)
+
+    def test_late_sort_result_cannot_extend_expired_scan_deadline(self):
+        self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                      timeout=30, scan_timeout=5)
+        self.start_running()
+        self.control.handle_mcu('PUSH?')
+        self.control.provide_target(100, 50)
+        self.control.handle_mcu('SCAN')
+        self.now = 5.01
+        self.assertFalse(self.control.provide_sort(2))
+        self.assertNotIn('SORT,2', self.sent)
+        self.assertFalse(self.control.snapshot().origin_confirmed)
+
+    def test_late_mcu_transition_cannot_extend_expired_deadline(self):
+        for late_line, setup in (
+            ('SCAN', 'wait_scan'), ('DONE', 'wait_done'),
+            ('PUSH?', 'running'), ('READY', 'resetting'),
+        ):
+            with self.subTest(late_line=late_line):
+                self.setUp()
+                self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                              timeout=30, verify_drop=True)
+                if setup == 'resetting':
+                    self.handshake()
+                    self.control.confirm_origin()
+                else:
+                    self.start_running()
+                    if setup != 'running':
+                        self.control.handle_mcu('PUSH?')
+                        self.control.provide_target(100, 50)
+                    if setup == 'wait_done':
+                        self.control.handle_mcu('SCAN')
+                        self.control.provide_sort(2)
+                self.now = 31
+                self.assertFalse(self.control.handle_mcu(late_line))
+                self.assertFalse(self.control.snapshot().origin_confirmed)
+                self.assertEqual(self.control.snapshot().completed_count, 0)
+
+    def test_late_drop_confirmation_fails_before_tick(self):
+        self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                      timeout=30, verify_drop=True)
+        self.start_running()
+        self.control.handle_mcu('PUSH?')
+        self.control.provide_target(100, 50)
+        self.control.handle_mcu('SCAN')
+        self.control.provide_sort(2)
+        self.control.handle_mcu('DONE')
+        epoch = self.control.request_epoch
+        self.now = 30.01
+        self.assertFalse(self.control.confirm_drop(epoch))
+        self.assertFalse(self.control.snapshot().origin_confirmed)
+        self.assertEqual(self.control.snapshot().completed_count, 0)
+
+    def test_late_host_ready_ack_cannot_send_start(self):
+        self.control = LiveController(self.sent.append, clock=lambda: self.now,
+                                      timeout=30, verify_drop=True)
+        self.arm()
+        self.assertTrue(self.control.start())
+        self.now = 30.01
+        self.assertFalse(self.control.handle_mcu('STATUS,HOST_READY'))
+        self.assertNotIn('START', self.sent)
+        self.assertFalse(self.control.snapshot().origin_confirmed)
+        self.assertFalse(self.control.ready)
+
     def test_no_target_waits_and_next_request_has_new_epoch(self):
         self.start_running()
         self.control.handle_mcu('PUSH?')

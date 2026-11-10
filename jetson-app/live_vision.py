@@ -76,12 +76,14 @@ class LiveVisionWorker(QThread):
     recognition_ready = Signal(int, object)
     location_ready = Signal(int, object)
     empty_reference_ready = Signal(int, object)
+    models_ready = Signal()
     failed = Signal(int, str)
     notice = Signal(str)
 
     def __init__(self, sources, parent=None, capture_factory=None,
                  recognizer_factory=default_recognizer_factory, tray_factory=None,
-                 scan_settle_seconds=0.8, drain_batches=4, clock=time.monotonic):
+                 scan_settle_seconds=0.8, drain_batches=4, clock=time.monotonic,
+                 tray_feature_input=False, tray_compensation=None, warm_models=False):
         super().__init__(parent)
         if set(sources) != set(CAMERA_ROLES):
             raise ValueError('All three physical camera roles must be configured')
@@ -103,6 +105,9 @@ class LiveVisionWorker(QThread):
         self._clock = clock
         self.recognizer_factory = recognizer_factory or default_recognizer_factory
         self.tray_factory = tray_factory or _default_tray_factory
+        self.tray_feature_input = tray_feature_input
+        self.tray_compensation = tray_compensation
+        self.warm_models = warm_models
         factory = capture_factory or (lambda path: open_live_capture(path, self.notice.emit))
         self._cameras = CameraService(self.sources, factory)
         self._requests = Queue(maxsize=1)
@@ -178,6 +183,24 @@ class LiveVisionWorker(QThread):
                     return
             self.frames_ready.emit(frames)
 
+            if self.warm_models and not self._stopping.is_set():
+                self.notice.emit('正在加载并试跑形状识别和托盘定位模型。')
+                recognizer = self.recognizer_factory()
+                if self._stopping.is_set():
+                    return
+                tray_backend = self.tray_factory()
+                frames = self._fresh_frames(0)
+                if frames is None:
+                    return
+                result = recognizer.recognize_pair(frames['left'], frames['right'])
+                if result.error:
+                    raise RuntimeError(result.error)
+                if self._stopping.is_set():
+                    return
+                TrayDetector(tray_backend, feature_input=self.tray_feature_input).detect(frames['top'])
+                if not self._stopping.is_set():
+                    self.models_ready.emit()
+
             while not self._stopping.is_set():
                 try:
                     request = self._requests.get_nowait()
@@ -239,7 +262,10 @@ class LiveVisionWorker(QThread):
                             self.recognition_ready.emit(token, result)
                     else:
                         _, _, calibration, roi, offsets = request
-                        locator = TrayLocator(calibration, TrayDetector(tray_backend), roi, offsets)
+                        detector = TrayDetector(tray_backend, feature_input=self.tray_feature_input)
+                        locator = TrayLocator(calibration, detector, roi, offsets,
+                                              compensation=self.tray_compensation,
+                                              skip_unsafe=self.tray_compensation is not None)
                         target = locator.locate(frames['top'])
                         if not self._stopping.is_set():
                             self.location_ready.emit(token, target)

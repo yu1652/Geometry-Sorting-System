@@ -139,6 +139,26 @@ class LegacyRecognizerTests(unittest.TestCase):
         self.segmenter = FakeBackend(*masks) if masks else None
         return LegacyRecognizer(self.detector, self.segmenter, self.classes, self.config)
 
+    def test_win8_recognizer_decodes_last_class_without_changing_color_path(self):
+        classes = tuple("win_%d" % i for i in range(8))
+        raw = _raw(self.left_box)[:, :12].copy()
+        recognizer = LegacyRecognizer(FakeBackend(raw), None, classes, self.config, expected_count=8)
+        result = recognizer.recognize_pair(self.left, self.right)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.detection.class_id, 7)
+        self.assertEqual(result.detection.class_name, "win_7")
+        self.assertEqual(result.detection.box, self.left_box[0])
+        self.assertEqual(result.color.name, "蓝色")
+        self.assertEqual(result.diagnostics['class_names'], list(classes))
+
+    def test_win8_recognizer_rejects_26_class_output(self):
+        classes = tuple("win_%d" % i for i in range(8))
+        recognizer = LegacyRecognizer(FakeBackend(_raw(self.left_box)), None, classes, self.config, expected_count=8)
+        result = recognizer.recognize_pair(self.left, self.right)
+        self.assertIsNone(result.detection)
+        self.assertEqual(result.mask_status, ("detection_error", "detection_error"))
+        self.assertIn("output class dimension", result.error)
+
     def test_highest_confidence_wins_shape_and_right_overlay_preserves_the_hole(self):
         left_before, right_before = self.left.copy(), self.right.copy()
         source = np.hstack((left_before, right_before))

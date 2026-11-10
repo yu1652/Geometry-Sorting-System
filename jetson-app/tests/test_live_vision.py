@@ -61,6 +61,27 @@ class Calibration:
 
 
 class LiveVisionTests(unittest.TestCase):
+    def test_warm_models_reports_ready_before_any_motion_job(self):
+        calls = []
+
+        class Tray:
+            def infer(self, tensor):
+                calls.append(('tray', tensor.shape))
+                return np.zeros((1, 5, 8400), np.float32)
+
+            def close(self):
+                calls.append(('close_tray',))
+
+        worker, _, _, results, failures, previews = self.worker(
+            recognizer_factory=lambda: Recognizer(calls), tray_factory=Tray,
+            warm_models=True, tray_feature_input=True)
+        worker.frames_ready.connect(lambda _: worker.shutdown() if len(previews) >= 10 else None)
+        worker.models_ready.connect(lambda: (calls.append(('ready',)), worker.shutdown()))
+        worker.run()
+        self.assertEqual([call[0] for call in calls], ['recognize', 'tray', 'ready', 'close_model', 'close_tray'])
+        self.assertEqual(results, [])
+        self.assertEqual(failures, [])
+
     def test_camera_fps_request_is_optional_when_driver_keeps_30_fps(self):
         capture = MagicMock()
         capture.isOpened.return_value = True

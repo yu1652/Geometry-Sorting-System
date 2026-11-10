@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 
 from app import (QApplication, ImageView, QDialog, QHBoxLayout, QLabel,
                  QMainWindow, QPushButton, QVBoxLayout, QWidget, QTimer,
@@ -28,11 +29,12 @@ from live_control import LiveController
 from live_vision import LiveVisionWorker
 from legacy_vision import surface_summary
 from calibration_frame import normalize_frame_settings
-from motion_limits import X_MAX_MM, Y_MAX_MM, position_in_machine
+from motion_limits import MACHINE_REGION, X_MAX_MM, Y_MAX_MM, position_in_machine
 from auto_bins import AutoBinSession, CapacityFull
 from runtime_diagnostics import RuntimeDiagnostics
 from scan_gate import ScanConsensus
 from scene_presence import EmptySceneReference, PresenceResult
+import linux_20261107 as release
 from sorter_console import (CalibrationDialog, DEFAULT_POINTS, TRAY_ROI,
                             button, fit_calibration)
 
@@ -40,7 +42,8 @@ ROOT = Path(__file__).resolve().parent
 ROLES = ('left', 'right', 'top')
 CAMERA_TITLES = ('识别区俯拍 / 拼图左', '识别区侧视 / 拼图右', '托盘定位俯拍')
 COLORS = ('红色', '橙色', '黄色', '绿色', '青色', '蓝色', '紫色', '黑色', '白色', '灰色')
-AUTO_STATES = {'enabling_auto', 'starting', 'running', 'locating', 'wait_scan', 'recognizing', 'wait_repush', 'wait_done'}
+AUTO_STATES = {'enabling_auto', 'starting', 'running', 'locating', 'wait_scan', 'recognizing',
+               'wait_repush', 'wait_done', 'verifying_drop'}
 DEFAULT_SOURCES = {
     role: '/dev/v4l/by-path/platform-3610000.xhci-usb-0:%s:1.0-video-index0' % port
     for role, port in zip(ROLES, ('2.1', '2.2', '2.4'))
@@ -63,7 +66,7 @@ def atomic_json(path, value):
             temporary.unlink()
 
 
-def validate_points(rows):
+def validate_points(rows, *, roi=TRAY_ROI, physical_region=MACHINE_REGION):
     if (not isinstance(rows, (list, tuple)) or len(rows) != 9
             or any(len(row) != 5 for row in rows)
             or {row[0] for row in rows} != {'P%s' % n for n in range(1, 10)}):
@@ -71,17 +74,21 @@ def validate_points(rows):
     for _, px, py, x, y in rows:
         if not (0 <= px < 640 and 0 <= py < 480 and position_in_machine(x, y)):
             raise ValueError(f'标定点超出画幅或机械行程：X 0–{X_MAX_MM:g}、Y 0–{Y_MAX_MM:g} mm')
-    return fit_calibration(rows)
+    return fit_calibration(rows, roi=roi, physical_region=physical_region)
 
 
 class LiveWindow(QMainWindow):
     simulation_mode = False
 
-    def __init__(self, data_dir=None, vision_factory=LiveVisionWorker, serial_factory=serial.Serial):
+    def __init__(self, data_dir=None, vision_factory=LiveVisionWorker, serial_factory=serial.Serial, *, linux_20261107=False):
         super().__init__()
+        self.linux_20261107 = linux_20261107
+        self._models_warm = False
+        self._drop_epoch = None
+        self._drop_checks = self._drop_empty_matches = 0
         self.data_dir = Path(data_dir) if data_dir else ROOT / 'data'
         self.calibration_path = self.data_dir / 'live_calibration.json'
-        self.auto_bins_path = self.data_dir / 'live_auto_bins.json'
+        self.auto_bins_path = self.data_dir / ('live_auto_bins_20261107.json' if linux_20261107 else 'live_auto_bins.json')
         self.device_path = self.data_dir / 'live_devices.json'
         self.diagnostics = RuntimeDiagnostics(self.data_dir)
         self.empty_reference = EmptySceneReference(self.data_dir / 'recognition_empty.npz')
@@ -91,10 +98,12 @@ class LiveWindow(QMainWindow):
         self._scan_next_at = 0
         self._empty_matches = 0
         self.calibration_frame = normalize_frame_settings()
-        self.names = (ROOT / 'models/legacy_classes.txt').read_text(encoding='utf8').splitlines()
+        self.names = (release.CLASS_NAMES if linux_20261107 else
+                      (ROOT / 'models/legacy_classes.txt').read_text(encoding='utf8').splitlines())
         self.sources = dict(DEFAULT_SOURCES)
         self._vision_factory, self._serial_factory = vision_factory, serial_factory
-        self.machine = LiveController(self._send)
+        self.machine = LiveController(self._send, verify_drop=linux_20261107,
+                                      scan_timeout=release.SCAN_TIMEOUT if linux_20261107 else None)
         self.serial_port = self.transport = self.vision = None
         self._handshake_at = None
         self._flushed = False
@@ -114,7 +123,7 @@ class LiveWindow(QMainWindow):
         self._binding_error = None
         self.calibration_valid = False
         self.calibration_rows = list(DEFAULT_POINTS)
-        self.setWindowTitle('YLERS · Xavier NX 实机分拣操作台')
+        self.setWindowTitle('YLERS · Xavier NX 实机分拣操作台' + (' · Linux 20261107' if linux_20261107 else ''))
         self.setStyleSheet(STYLE)
         self.resize(1024, 680)
         self._make_ui()
@@ -124,7 +133,10 @@ class LiveWindow(QMainWindow):
         self.timer.timeout.connect(self.poll_serial)
         self.timer.start(40)
         self.write_log('实机入口已打开。先连接相机与串口，手动对零后确认。')
-        self.write_log('自动识别：模型就绪后重新取图，等待至少 0.8 秒；最多复核 8 次，连续两次形状和颜色一致才投箱。')
+        attempts = release.SCAN_ATTEMPTS if linux_20261107 else 8
+        self.write_log('自动识别：模型就绪后重新取图，等待至少 0.8 秒；最多复核 %d 次，连续两次形状和颜色一致才投箱。' % attempts)
+        if linux_20261107:
+            self.write_log('Linux 20261107：八类形状模型，投箱后验空，本轮目标 %d 件。' % release.ROUND_SIZE)
         self.write_log('先清空识别区并采集空区参考；双摄连续三次确认空区后才自动请求新一轮推料。')
 
     def _make_ui(self):
@@ -282,7 +294,7 @@ class LiveWindow(QMainWindow):
         self.machine_status.setText('状态 %s · XY %.1f, %.1f mm · 升降 %s · %s' % (
             state.state, state.x_mm, state.y_mm, '下降' if state.pusher_down else '抬起',
             '动作等待确认' if self.machine.pending else ''))
-        self.banner.setText('实机模式 · %s · %s · 自动分箱 %s/6' % (
+        self.banner.setText(('Linux 20261107' if self.linux_20261107 else '实机模式') + ' · %s · %s · 自动分箱 %s/6' % (
             '零点已确认' if state.origin_confirmed else '待手动对零确认',
             '通信已验收' if self.machine.ready else '通信未就绪', len(self.bindings)))
 
@@ -414,13 +426,20 @@ class LiveWindow(QMainWindow):
             return
         try:
             self._frames_at = None
-            self.vision = self._vision_factory(self.sources, self)
+            self._models_warm = False
+            settings = {}
+            if self.linux_20261107:
+                settings = dict(recognizer_factory=release.make_recognizer, tray_factory=release.make_tray_backend,
+                                drain_batches=5, tray_feature_input=True,
+                                tray_compensation=release.TRAY_COMPENSATION, warm_models=True)
+            self.vision = self._vision_factory(self.sources, self, **settings)
             self.vision.frames_ready.connect(self.on_frames)
             self.vision.recognition_ready.connect(self.on_recognized)
             self.vision.empty_reference_ready.connect(self.on_empty_reference)
             self.vision.location_ready.connect(self.on_located)
             self.vision.failed.connect(self.on_vision_failed)
             self.vision.notice.connect(self.write_log)
+            self.vision.models_ready.connect(self.on_models_ready)
             self.vision.finished.connect(self._vision_finished)
             self.vision.start()
             self.camera_button.setText('断开相机')
@@ -428,6 +447,11 @@ class LiveWindow(QMainWindow):
         except Exception as error:
             self.vision = None
             self.write_log('相机连接失败：' + str(error))
+
+    def on_models_ready(self):
+        if self.vision is not None and not self._closing:
+            self._models_warm = True
+            self.write_log('形状识别和托盘定位模型已试跑。')
 
     def on_frames(self, frames):
         if self.vision is None or self._closing or self._model_pending:
@@ -532,6 +556,16 @@ class LiveWindow(QMainWindow):
         if self._models_open() or self._disconnect_deadline is not None:
             self.write_log('模型管理或断开流程进行中。')
             return False
+        if self.linux_20261107:
+            if self.auto_bins.total >= release.ROUND_SIZE:
+                self.write_log('本轮已完成，请清空六箱并开启新一轮。')
+                return False
+            if not self._models_warm:
+                self.write_log('请等待两套模型加载和试跑完成。')
+                return False
+            if self.empty_reference.assess(self.frames, self.sources).state != 'empty':
+                self.write_log('启动需要识别区为空且与空区参考匹配，请清空后采集空区参考。')
+                return False
         return self._command(self.machine.start, '启动请求已发送。')
 
     def _automatic_ready(self):
@@ -577,8 +611,13 @@ class LiveWindow(QMainWindow):
             if kind in ('locate', 'manual_locate'):
                 if not self.calibration_valid:
                     raise ValueError('请先保存九点标定。')
-                accepted = self.vision.locate(token, validate_points(self.calibration_rows), TRAY_ROI, (4, 0))
-            elif kind == 'empty_reference':
+                if self.linux_20261107:
+                    roi, offset, bounds = release.TRAY_ROI, release.PUSH_OFFSET, release.PICK_REGION
+                else:
+                    roi, offset, bounds = TRAY_ROI, (4, 0), MACHINE_REGION
+                calibration = validate_points(self.calibration_rows, roi=roi, physical_region=bounds)
+                accepted = self.vision.locate(token, calibration, roi, offset)
+            elif kind in ('empty_reference', 'drop_clearance'):
                 accepted = self.vision.capture_empty(token)
             else:
                 accepted = self.vision.recognize(token, settle=True) if kind == 'sort' else self.vision.recognize(token)
@@ -586,7 +625,7 @@ class LiveWindow(QMainWindow):
         except Exception as error:
             self._job = None
             self.write_log('视觉请求失败：' + str(error))
-            if kind in ('locate', 'sort'):
+            if kind in ('locate', 'sort', 'drop_clearance'):
                 self.stop()
             return False
         if not accepted:
@@ -617,7 +656,11 @@ class LiveWindow(QMainWindow):
         return self._request('empty_reference')
 
     def on_empty_reference(self, token, frames):
-        if self._take_job(token) != 'empty_reference':
+        kind = self._take_job(token)
+        if kind == 'drop_clearance':
+            self._check_drop_clearance(token, frames)
+            return
+        if kind != 'empty_reference':
             return
         if (self.machine.snapshot().state in AUTO_STATES or self.machine.pending or self._closing
                 or self.machine.connected and not self.machine.idle_confirmed):
@@ -629,6 +672,29 @@ class LiveWindow(QMainWindow):
         except (OSError, ValueError, TypeError, cv2.error) as error:
             self.write_log('空区参考保存失败：' + str(error))
 
+    def _check_drop_clearance(self, token, frames):
+        if self.machine.snapshot().state != 'verifying_drop' or not self._automatic_ready():
+            self.stop()
+            return
+        presence = self.empty_reference.assess(frames, self.sources)
+        self._drop_checks += 1
+        self._drop_empty_matches = self._drop_empty_matches + 1 if presence.state == 'empty' else 0
+        self.write_log('投箱验空 %d/5，连续空区 %d/3：%s' % (
+            self._drop_checks, self._drop_empty_matches, presence.reason))
+        if self._drop_empty_matches >= 3:
+            if self.machine.confirm_drop(self._drop_epoch):
+                self.record_completion()
+            else:
+                self.stop()
+        elif self._drop_checks >= 5:
+            self.stop()
+            self.write_log('投箱后未确认识别区清空，已停止进料。')
+            result = SimpleNamespace(diagnostics={'captures': frames,
+                                     'empty_reference_bytes': presence.reference_bytes})
+            self._save_diagnostic(result, token, 'drop_clearance', {
+                'state': presence.state, 'reason': presence.reason, 'scores': presence.scores,
+                'reference_sha256': presence.reference_sha256})
+
     def manual_locate(self):
         if self.machine.snapshot().state in AUTO_STATES or self.machine.pending:
             self.write_log('请先停止自动流程，再手动定位。')
@@ -639,11 +705,18 @@ class LiveWindow(QMainWindow):
         if self._job is not None:
             return
         state = self.machine.snapshot().state
+        if state == 'verifying_drop':
+            if self._drop_epoch != self.machine.epoch:
+                self._drop_epoch = self.machine.epoch
+                self._drop_checks = self._drop_empty_matches = 0
+            if not self._request('drop_clearance'):
+                self.stop()
+            return
         if state in ('locating', 'recognizing'):
             if state == 'recognizing':
                 if self._scan_epoch != self.machine.epoch:
                     self._scan_epoch = self.machine.epoch
-                    self._scan_gate = ScanConsensus()
+                    self._scan_gate = ScanConsensus(max_attempts=release.SCAN_ATTEMPTS if self.linux_20261107 else 8)
                     self._empty_matches = 0
                     self._scan_next_at = 0
                 if time.monotonic() < self._scan_next_at:
@@ -686,7 +759,7 @@ class LiveWindow(QMainWindow):
         color_name = color.name if color else '未知颜色'
         confidence = '%.1f%%' % (detection.confidence * 100) if detection else '—'
         self.result_label.setText('%s / %s · %s · %.1f ms\n%s' % (
-            shape, color_name, confidence, result.elapsed_ms, surface_summary(result)))
+            self._shape_name(shape), color_name, confidence, result.elapsed_ms, surface_summary(result)))
         scene_text = {'empty': '识别区为空', 'occupied': '识别区有物块', 'unknown': '识别区是否为空尚未确认'}[presence.state]
         if detection is not None:
             scene_text = '空区判断与目标检测冲突，等待复核' if conflicting_empty else '已检出物块'
@@ -733,8 +806,14 @@ class LiveWindow(QMainWindow):
                 return
             if decision == 'exhausted':
                 self.stop()
-                self.write_log('8 次复核未得到连续一致的有效形状和颜色，未分配箱号、未投箱。请导出诊断。')
+                self.write_log('%d 次复核未得到连续一致的有效形状和颜色，未分配箱号、未投箱。请导出诊断。' % self._scan_gate.attempts)
                 return
+            if self.linux_20261107:
+                self.machine.tick()
+                if self.machine.snapshot().state != 'recognizing':
+                    self.write_log(self.machine.snapshot().last_error or '扫描已结束，未分配箱号。')
+                    return
+            new_binding = (shape, color_name) not in self.bindings
             try:
                 # Persist the reservation before sending SORT. A missing DONE
                 # must not let a different category reuse the same physical box.
@@ -752,6 +831,15 @@ class LiveWindow(QMainWindow):
                 self._last_sort = (shape, color_name, bin_id, result)
                 self.write_log('%s %s → %s号箱，等待投箱完成。' % (color_name, shape, bin_id))
             else:
+                # A deadline rejection stops locally before writing SORT.
+                # A serial write error disconnects, so its pending record stays.
+                if (self.linux_20261107 and not self.machine.ready
+                        and self.machine.snapshot().state == 'stopped'):
+                    try:
+                        self.auto_bins.cancel_unsent(bin_id, new_binding=new_binding)
+                        self._refresh_binding_display()
+                    except (OSError, ValueError) as error:
+                        self.write_log('未发送投箱，但撤回预留记录失败：' + str(error))
                 self.stop()
 
     def on_located(self, token, target):
@@ -774,7 +862,7 @@ class LiveWindow(QMainWindow):
             return
         self._job = None
         self.write_log('视觉失败：' + str(message))
-        if self.machine.connected and (token == -1 or (job and job[2] in ('locate', 'sort'))):
+        if self.machine.connected and (token == -1 or (job and job[2] in ('locate', 'sort', 'drop_clearance'))):
             self.stop()
 
     def record_completion(self):
@@ -793,7 +881,7 @@ class LiveWindow(QMainWindow):
         total = self.auto_bins.total
         row = self.records.rowCount()
         self.records.insertRow(row)
-        for column, value in ((0, total), (1, '%s %s → %s号盒' % (color, shape, bin_id)), (3, total)):
+        for column, value in ((0, total), (1, '%s %s → %s号盒' % (color, self._shape_name(shape), bin_id)), (3, total)):
             self.records.setItem(row, column, QTableWidgetItem(str(value)))
         image = ImageView('')
         image.setMinimumHeight(0)
@@ -815,6 +903,13 @@ class LiveWindow(QMainWindow):
         except OSError as error:
             self.stop()
             self.write_log('结果保存失败：' + str(error))
+            return
+        if self.linux_20261107 and total >= release.ROUND_SIZE:
+            self.stop()
+            self.write_log('本轮 %d 件已确认投放，已结束。' % total)
+
+    def _shape_name(self, shape):
+        return release.SHAPES.get(shape, shape) if self.linux_20261107 else shape
 
     @property
     def bindings(self):
@@ -837,7 +932,7 @@ class LiveWindow(QMainWindow):
         if pending is None:
             return True
         return bool(in_flight and self._last_sort is not None
-                    and self.machine.snapshot().state == 'wait_done'
+                    and self.machine.snapshot().state in ('wait_done', 'verifying_drop')
                     and (pending['shape'], pending['color'], pending['bin']) == self._last_sort[:3])
 
     def _refresh_binding_display(self):
@@ -850,13 +945,13 @@ class LiveWindow(QMainWindow):
         entries = {row['bin']: row for row in self.auto_bins.entries} if self.auto_bins else {}
         pending = self.auto_bins.pending if self.auto_bins else None
         total = self.auto_bins.total if self.auto_bins else 0
-        self.total_label.setText('本轮成功总数 %s' % total)
+        self.total_label.setText('本轮已投放 %s/%s' % (total, release.ROUND_SIZE) if self.linux_20261107 else '本轮成功总数 %s' % total)
         for number, label in enumerate(self.bin_labels, 1):
             row = entries.get(number)
             label.setText('%s号箱 · %s件' % (number, row['count'] if row else 0))
             label.setToolTip('%s %s' % (row['color'], row['shape']) if row else '按首次出现顺序自动绑定')
             if row:
-                label.setText(label.text() + '\n%s %s' % (row['color'], row['shape']))
+                label.setText(label.text() + '\n%s %s' % (row['color'], self._shape_name(row['shape'])))
             if pending is not None and pending['bin'] == number:
                 label.setText(label.text() + ' · 待确认')
 
@@ -994,8 +1089,11 @@ class LiveWindow(QMainWindow):
             raw, _, _ = prepare_legacy_pair(self.frames['left'], self.frames['right'])
             if not cv2.imwrite(str(path), raw):
                 raise OSError('无法保存模型试跑图片')
-            self._model_process = subprocess.Popen([sys.executable, str(ROOT / 'app.py'), '--raw', '--file', str(path)], cwd=str(ROOT))
-            self.write_log('已打开离线模型验证窗口，通过「设置 / 日志 → 模型管理」更换模型。')
+            arguments = [sys.executable, str(ROOT / 'app.py'), '--raw', '--file', str(path)]
+            if self.linux_20261107:
+                arguments.append('--linux-20261107')
+            self._model_process = subprocess.Popen(arguments, cwd=str(ROOT))
+            self.write_log('已打开离线模型验证窗口。')
         except (OSError, ValueError) as error:
             self.write_log('模型窗口启动失败：' + str(error))
 
@@ -1024,9 +1122,10 @@ class LiveWindow(QMainWindow):
 def main():
     parser = argparse.ArgumentParser(description='Xavier NX 实机调试、比赛与九点标定')
     parser.add_argument('--fullscreen', action='store_true')
+    parser.add_argument('--linux-20261107', action='store_true', help='使用新版 Linux 8 类模型和比赛流程')
     args = parser.parse_args()
     application = QApplication(sys.argv[:1])
-    window = LiveWindow()
+    window = LiveWindow(linux_20261107=args.linux_20261107)
     window.showFullScreen() if args.fullscreen else window.show()
     return application.exec()
 

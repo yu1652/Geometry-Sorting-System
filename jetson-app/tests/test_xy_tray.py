@@ -43,3 +43,87 @@ class TrayDetectorTests(unittest.TestCase):
         boxes = TrayDetector(Backend()).detect(np.zeros((480,640,3), dtype=np.uint8))
         self.assertEqual(len(boxes), 1)
         np.testing.assert_allclose(boxes[0][:4], (220,190,420,290))
+
+    def test_feature_input_changes_model_tensor_before_letterboxing(self):
+        from tray_locator import TrayDetector
+
+        class Backend:
+            def infer(self, tensor):
+                self.tensor = tensor
+                return np.zeros((1, 5, 8400), dtype=np.float32)
+
+        frame = np.zeros((87, 152, 3), dtype=np.uint8)
+        frame[20:60, 30:100] = (51, 113, 219)
+        raw, feature = Backend(), Backend()
+        TrayDetector(raw).detect(frame)
+        TrayDetector(feature, feature_input=True).detect(frame)
+
+        from feature_preprocess import feature_bgr
+        from vision import letterbox_rgb
+        np.testing.assert_array_equal(raw.tensor, letterbox_rgb(frame, size=640)[0])
+        np.testing.assert_array_equal(feature.tensor, letterbox_rgb(feature_bgr(frame), size=640)[0])
+        self.assertFalse(np.array_equal(raw.tensor, feature.tensor))
+
+
+class TrayCompensationTests(unittest.TestCase):
+    compensation = {
+        'center': [80, 80], 'span': [80, 80],
+        'x_left': 0, 'x_right': -4, 'y_top': 6, 'y_bottom': -6,
+    }
+
+    def setUp(self):
+        points = [CalibrationPoint(x, y, x, y) for x in (10, 110, 210) for y in (10, 110, 210)]
+        self.calibration = XYCalibration.fit(points, pixel_region=(0, 0, 220, 220),
+                                             physical_region=(0, 0, 220, 220))
+        self.frame = np.zeros((220, 220, 3), dtype=np.uint8)
+
+    def locate(self, x, y, offsets=(4, 0)):
+        class Detector:
+            def detect(self, image):
+                # A more confident detection to the right must still lose to the leftmost piece.
+                return [(x - 1, y - 1, x + 2, y + 1, .99), (x - 5, y - 1, x, y + 1, .8)]
+
+        return TrayLocator(self.calibration, Detector(), (0, 0, 220, 220), offsets=offsets,
+                           compensation=self.compensation).locate(self.frame)
+
+    def test_position_compensation_is_centered_linear_and_bounded(self):
+        for position, expected in (
+            ((80, 80), (84, 80)),
+            ((40, 40), (44, 43)),
+            ((120, 120), (122, 117)),
+            ((160, 160), (160, 154)),
+            ((200, 200), (200, 194)),
+        ):
+            with self.subTest(position=position):
+                np.testing.assert_allclose(self.locate(*position), expected, atol=1e-9)
+
+    def test_position_compensation_validates_combined_target(self):
+        # Each correction alone is legal, but the combined Y would be 221.5 mm.
+        with self.assertRaisesRegex(ValueError, 'outside physical region'):
+            self.locate(120, 40, offsets=(4, 178.5))
+
+    def test_optional_safe_selection_skips_invalid_center_edge_and_corrected_target(self):
+        points = [CalibrationPoint(x, y, x, y) for x in (20, 110, 200) for y in (20, 110, 200)]
+        calibration = XYCalibration.fit(points, pixel_region=(0, 0, 220, 220),
+                                        physical_region=(10, 10, 210, 210))
+
+        class Detector:
+            def detect(self, image):
+                return self.detections
+
+        detector = Detector()
+        settings = dict(offsets=(4, 13), compensation=self.compensation)
+        safe = TrayLocator(calibration, detector, (0, 0, 220, 220), skip_unsafe=True, **settings)
+        strict = TrayLocator(calibration, detector, (0, 0, 220, 220), **settings)
+        for unsafe in (
+            (0, 40, 8, 60, .8),       # Center X is outside the physical region.
+            (20, 30, 220, 50, .8),   # Edge X is outside the physical region.
+            (20, 200, 40, 208, .8),  # Edge Y is valid until the offsets raise it to 211.
+        ):
+            with self.subTest(unsafe=unsafe):
+                detector.detections = [(135, 75, 160, 85, .9), unsafe]
+                with self.assertRaisesRegex(ValueError, 'outside physical region'):
+                    strict.locate(self.frame)
+                np.testing.assert_allclose(safe.locate(self.frame), (160, 93), atol=1e-9)
+                detector.detections = [unsafe]
+                self.assertIsNone(safe.locate(self.frame))

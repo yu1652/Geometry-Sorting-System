@@ -100,8 +100,8 @@ def decode_yolo_raw(
     expected_count: int = 23,
 ) -> List[Detection]:
     """Decode YOLO11 [1, 4 + nc, N] output and run class-aware NMS."""
-    if expected_count not in (1, 23, 26):
-        raise ValueError("expected_count must be 1, 23 or 26")
+    if expected_count not in (1, 8, 23, 26):
+        raise ValueError("expected_count must be 1, 8, 23 or 26")
     if len(class_names) != expected_count:
         raise ValueError("class_names must contain exactly %d entries" % expected_count)
     if not isinstance(output, np.ndarray) or output.ndim != 3 or output.shape[0] != 1:
@@ -159,8 +159,8 @@ def decode_yolo_raw(
 
 def load_class_names(path, expected_count: int = 23) -> List[str]:
     """Load class names, allowing a training reserve tail for the 23-class model."""
-    if expected_count not in (1, 23, 26):
-        raise ValueError("expected_count must be 1, 23 or 26")
+    if expected_count not in (1, 8, 23, 26):
+        raise ValueError("expected_count must be 1, 8, 23 or 26")
     try:
         entries = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -253,6 +253,13 @@ def classify_hsv(frame_bgr: np.ndarray, mask: np.ndarray, box, config) -> ColorR
     x1, y1, x2, y2 = _safe_box_roi(box, frame_bgr.shape[1], frame_bgr.shape[0])
     if x1 >= x2 or y1 >= y2:
         return ColorResult(unknown_name, 0.0, 0)
+    center_ratio = float(color_config.get('bbox_center_ratio', 1.0))
+    if not 0 < center_ratio <= 1:
+        raise ValueError('bbox_center_ratio must be in (0, 1]')
+    inset_x = int((x2 - x1) * (1 - center_ratio) / 2)
+    inset_y = int((y2 - y1) * (1 - center_ratio) / 2)
+    x1, x2 = x1 + inset_x, x2 - inset_x
+    y1, y2 = y1 + inset_y, y2 - inset_y
     selected = mask[y1:y2, x1:x2].astype(bool)
     valid_pixels = int(selected.sum())
     minimum = int(color_config["min_valid_pixels"])
@@ -273,7 +280,10 @@ def classify_hsv(frame_bgr: np.ndarray, mask: np.ndarray, box, config) -> ColorR
             & (value < int(color_config["white_value_min"]))
         )),
     }
-    chromatic = ~achromatic
+    chromatic = (~achromatic
+                 & (saturation >= int(color_config.get('valid_min_saturation', 0)))
+                 & (value >= int(color_config.get('valid_min_value', 0)))
+                 & (value <= int(color_config.get('valid_max_value', 255))))
     for name, ranges in color_config["hsv_ranges"].items():
         matches = np.zeros(valid_pixels, dtype=bool)
         for hsv_range in ranges:

@@ -16,14 +16,19 @@ def _position(x, y):
 
 
 class LiveController:
-    def __init__(self, send, clock=time.monotonic, timeout=30, steps_per_mm=(40, 39)):
+    def __init__(self, send, clock=time.monotonic, timeout=30, steps_per_mm=(40, 39),
+                 verify_drop=False, scan_timeout=None):
         if not callable(send) or not callable(clock):
             raise ValueError('send and clock must be callable')
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError('timeout must be finite and positive')
+        if scan_timeout is not None and (not math.isfinite(scan_timeout) or scan_timeout <= 0):
+            raise ValueError('scan_timeout must be finite and positive')
         if len(steps_per_mm) != 2 or any(not math.isfinite(v) or v <= 0 for v in steps_per_mm):
             raise ValueError('steps_per_mm must contain two positive finite values')
         self._send, self._clock, self._timeout = send, clock, timeout
+        self._verify_drop = verify_drop
+        self._scan_timeout = scan_timeout
         self._steps = tuple(steps_per_mm)
         self._connected = False
         self.ready = False
@@ -93,7 +98,29 @@ class LiveController:
 
     def _wait(self, state):
         self._state = state
-        self._deadline = self._clock() + self._timeout
+        duration = self._scan_timeout if state == 'recognizing' and self._scan_timeout is not None else self._timeout
+        self._deadline = self._clock() + duration
+
+    def _expired_action(self):
+        if ((self._verify_drop or self._scan_timeout is not None)
+                and self._deadline is not None and self._clock() >= self._deadline):
+            self._fault('通信或动作等待超时，请检查机构后重新确认零点')
+            self.ready = False
+            return True
+        return False
+
+    def confirm_drop(self, epoch):
+        """Accept a fresh host clearance result after the MCU's DONE event."""
+        if self._state == 'verifying_drop' and self._expired_action():
+            return False
+        if (not self._verify_drop or self._state != 'verifying_drop'
+                or not self.ready or not self._origin or self._bin is None
+                or epoch != self.epoch):
+            return False
+        self._counts[self._bin - 1] += 1
+        self._bin = None
+        self._wait('running')
+        return True
 
     def begin_handshake(self):
         self._disarm('handshaking')
@@ -165,6 +192,8 @@ class LiveController:
         return self._write('PUSHER,DOWN' if down else 'PUSHER,UP')
 
     def provide_target(self, x=None, y=None):
+        if self._state == 'locating' and self._expired_action():
+            return False
         if not self.ready or not self._origin or self._state != 'locating':
             return self._reject('没有等待中的定位请求')
         if x is None and y is None:
@@ -177,6 +206,8 @@ class LiveController:
         return self._write('PUSH,{:.3f},{:.3f},mm'.format(x, y))
 
     def provide_sort(self, bin_id):
+        if self._state == 'recognizing' and self._expired_action():
+            return False
         if not self.ready or not self._origin or self._state != 'recognizing':
             return self._reject('没有等待中的识别请求')
         if type(bin_id) is not int or not 1 <= bin_id <= 6:
@@ -193,6 +224,8 @@ class LiveController:
         PUSH? and performs no gate/bin action. Wait for a real ACK/request;
         never invent DONE or reuse the previous tray coordinate.
         """
+        if self._state == 'recognizing' and self._expired_action():
+            return False
         if not self.ready or not self._origin or self._state != 'recognizing':
             return self._reject('当前没有可重新推料的识别请求')
         self.epoch += 1
@@ -232,6 +265,8 @@ class LiveController:
         if head == 'BOOT' and len(fields) == 2 and fields[1].isdigit():
             self._boot_id = fields[1]
             return self.begin_handshake()
+        if line in ('READY', 'PUSH?', 'SCAN', 'DONE') and self._expired_action():
+            return False
         if line == 'READY':
             self._last_rx = self._clock()
             if self._state == 'resetting':
@@ -259,9 +294,13 @@ class LiveController:
             self.epoch += 1
             self._wait('recognizing')
         elif line == 'DONE' and self._state == 'wait_done' and self._bin is not None:
-            self._counts[self._bin - 1] += 1
-            self._bin = None
-            self._wait('running')
+            if self._verify_drop:
+                self.epoch += 1
+                self._wait('verifying_drop')
+            else:
+                self._counts[self._bin - 1] += 1
+                self._bin = None
+                self._wait('running')
         else:
             return False
         self._last_rx = self._clock()
@@ -302,6 +341,8 @@ class LiveController:
         return True
 
     def _status(self, fields):
+        if fields in (['HOST_READY'], ['START']) and self._expired_action():
+            return False
         self._last_rx = self._clock()
         if fields == ['PUSH', 'WAIT'] and self.ready and self._origin and self._state == 'wait_repush':
             self._wait('running')
