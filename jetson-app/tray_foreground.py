@@ -26,39 +26,43 @@ def _validate_image(image, label):
         raise ValueError(label+' must be a uint8 HxWx3 BGR image of at least 64x64')
 
 
-def _tray_split_hints(hints, width, height):
+def _tray_split_hints(hints, width, height, minimum_confidence=.60):
     for hint in hints:
         try:
             x1, y1, x2, y2, score = map(float, hint)
         except (TypeError, ValueError):
             continue
-        if (.60 <= score <= 1 and 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height
+        if (minimum_confidence <= score <= 1 and 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height
                 and min(x2 - x1, y2 - y1) >= 16):
             yield (x1, y1, x2, y2), score
 
 
-def _hint_support_masks(region, x, y, hints, minimum_area):
+def _hint_support_masks(region, x, y, hints, minimum_area, padding=6):
     height, width = region.shape
     yy, xx = np.ogrid[y:y + height, x:x + width]
     for x1, y1, x2, y2 in hints:
         tight = (xx >= x1) & (xx < x2) & (yy >= y1) & (yy < y2)
         if np.count_nonzero(region & tight) >= max(minimum_area, .25 * (x2 - x1) * (y2 - y1)):
-            yield (xx >= x1 - 6) & (xx < x2 + 6) & (yy >= y1 - 6) & (yy < y2 + 6)
+            yield (x1, y1, x2, y2), ((xx >= x1 - padding) & (xx < x2 + padding)
+                                     & (yy >= y1 - padding) & (yy < y2 + padding))
 
 
-def _split_supported_component(image, region, x, y, hints, minimum_area, seam_contrast):
+def _split_supported_component(image, region, x, y, hints, minimum_area, seam_contrast, *, partial=False):
     """Partition only observed pixels, using separate model seeds and visible seams."""
     strong_hints, secondary_hints = hints
-    supports = list(_hint_support_masks(region, x, y, strong_hints, minimum_area))
+    supported = list(_hint_support_masks(region, x, y, strong_hints, minimum_area, 16 if partial else 6))
+    supports = [mask for box, mask in supported]
     if len(supports) < 2:
         return ()
     coverage = np.sum(supports, axis=0)
     remaining = region & (coverage == 0)
     allowed_uncovered = .02 * np.count_nonzero(region)
     if np.count_nonzero(remaining) > allowed_uncovered:
+        if partial:
+            return ()
         # A single lower-confidence detection may explain a missing part of
         # the observed region. The two strong seeds and the seams still apply.
-        completing = [mask for mask in _hint_support_masks(region, x, y, secondary_hints, minimum_area)
+        completing = [mask for box, mask in _hint_support_masks(region, x, y, secondary_hints, minimum_area)
                       if np.count_nonzero(remaining & mask) >= minimum_area
                       and np.count_nonzero(remaining & ~mask) <= allowed_uncovered]
         if len(completing) != 1:
@@ -89,17 +93,50 @@ def _split_supported_component(image, region, x, y, hints, minimum_area, seam_co
     kernel = np.ones((5, 5), dtype=np.uint8)
     interior = cv2.erode(region.astype(np.uint8), kernel) > 0
     gradient = cv2.morphologyEx(image, cv2.MORPH_GRADIENT, kernel).max(axis=2)
-    for part in parts:
-        if np.count_nonzero(part) < minimum_area:
-            return ()
+    verified = []
+    for index, part in enumerate(parts):
         # Sample the internal cut, away from the foreground/background edge.
         neighbors = cv2.dilate(part.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)) > 0
         seam = gradient[interior & neighbors & ~part]
-        if len(seam) < 8 or np.median(seam) < seam_contrast:
-            return ()
         count, _, stats, _ = cv2.connectedComponentsWithStats(part.astype(np.uint8), connectivity=8)
-        if count != 2 or min(stats[1, 2:4]) < 16 or stats[1, cv2.CC_STAT_AREA] > 23000:
+        if (len(seam) < 8 or np.median(seam) < seam_contrast or count != 2
+                or min(stats[1, 2:4]) < 16 or not minimum_area <= stats[1, cv2.CC_STAT_AREA] <= 23000):
+            if partial:
+                continue
             return ()
+        if partial:
+            # A reliable local boundary must separate this part from every
+            # substantial neighboring partition, even if that neighbor is clipped.
+            contact_bands = [gradient[interior & neighbors & other]
+                             for j, other in enumerate(parts) if index != j]
+            if any(len(band) >= 8 and np.median(band) < seam_contrast for band in contact_bands):
+                continue
+            hx1, hy1, hx2, hy2 = supported[index][0]
+            px, py, pw, ph = stats[1, :4]
+            px, py = px + x, py + y
+            overlap = max(0, min(px + pw, hx2) - max(px, hx1)) * max(0, min(py + ph, hy2) - max(py, hy1))
+            if overlap < .55 * (pw * ph + (hx2 - hx1) * (hy2 - hy1) - overlap):
+                continue
+        verified.append(part)
+    return verified
+
+
+def _split_yellow_subgroups(image, hsv, region, x, y, strong, confirmed, minimum_area, seam_contrast):
+    # The warm mask spans reds and yellows. Analyze yellow connected regions
+    # separately when the fresh model recheck independently locates a part.
+    yellow = (region & (hsv[:, :, 0] >= 17)).astype(np.uint8)
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(yellow, connectivity=8)
+    parts = []
+    for index, stat in enumerate(stats[1:], 1):
+        if stat[cv2.CC_STAT_AREA] < 2 * minimum_area:
+            continue
+        component = labels == index
+        known_boxes = tuple(box for box, _ in _hint_support_masks(component, x, y, strong, minimum_area))
+        new_boxes = tuple(box for box, _ in _hint_support_masks(component, x, y, confirmed, minimum_area))
+        if not known_boxes or not new_boxes:
+            continue
+        parts.extend(_split_supported_component(image, component, x, y,
+                     (known_boxes + new_boxes, ()), minimum_area, seam_contrast))
     return parts
 
 
@@ -147,10 +184,11 @@ def _servo_cable_support(hsv):
 
 
 class TrayForegroundDetector:
-    def __init__(self, reference_roi, pale_hints=()):
+    def __init__(self, reference_roi, pale_hints=(), *, confirmed_warm_hints=()):
         _validate_image(reference_roi, 'reference')
         self.ref = reference_roi.copy()
         self.pale_hints = pale_hints
+        self.confirmed_warm_hints = confirmed_warm_hints
         self._reference_sha256 = hashlib.sha256(self.ref.tobytes()).hexdigest()
         self.last_diagnostics = {}
         self.ref_hsv = cv2.cvtColor(self.ref, cv2.COLOR_BGR2HSV)
@@ -175,31 +213,57 @@ class TrayForegroundDetector:
         self.completion_work = cv2.dilate(self.completion_work,np.ones((65,65),np.uint8))
 
     def _add_model_splits(self, group, image, hsv, delta_v, cleaned, labels, stats,
-                          cable_labels, hints, minimum_area, detections, merged_mask):
+                          cable_labels, hints, minimum_area, detections, blocking, merged_mask,
+                          confirmed_warm):
         if group not in COLORED_SPLIT_GROUPS:
             hints = (hints[0], ())
         height, width = labels.shape
         for label, (x, y, w, h, area) in enumerate(stats[1:], 1):
-            if area < 2 * minimum_area or label in cable_labels or x + w >= width - 1:
+            refine_yellow = group == 'warm' and area > 23000 and bool(confirmed_warm)
+            rear_clipped = x + w >= width - 1
+            if area < 2 * minimum_area or label in cable_labels or (rear_clipped and not refine_yellow):
                 continue
             x1, y1 = max(0, x - 3), max(0, y - 3)
             x2, y2 = min(width, x + w + 3), min(height, y + h + 3)
             crop = np.s_[y1:y2, x1:x2]
             region = labels[crop] == label
-            if np.any(region & (self.completion_work[crop] == 0)):
+            inside = self.completion_work[crop] > 0
+            fully_observed = not rear_clipped and not np.any(region & ~inside)
+            if not fully_observed and not refine_yellow:
                 continue
             local_image = image[crop]
             seam_contrast = 8 if group == 'dark_part' else 15
-            parts = _split_supported_component(local_image, region, x1, y1, hints, minimum_area,
-                                               seam_contrast)
             floor = self.reference_floor[crop] & (self.work[crop] > 0)
             if group == 'dark_part':
                 floor &= (hsv[crop][:, :, 2] < 32) & (delta_v[crop] < -80)
-            if not parts or any(np.count_nonzero(part & floor) < minimum_area for part in parts):
+            parts = ()
+            if fully_observed:
+                parts = _split_supported_component(local_image, region, x1, y1, hints, minimum_area, seam_contrast)
+            if any(np.count_nonzero(part & floor) < minimum_area for part in parts):
+                parts = ()
+            if not parts:
+                # Keep independently visible pieces in a large warm component
+                # even when a neighbor is clipped or unresolved.
+                if refine_yellow:
+                    parts = _split_yellow_subgroups(local_image, hsv[crop], region & inside, x1, y1,
+                                                   hints[0], confirmed_warm, minimum_area, seam_contrast)
+                if not parts and fully_observed and group == 'warm' and area > 23000 and (y == 0 or y + h == height):
+                    parts = _split_supported_component(local_image, region, x1, y1, hints,
+                                                      minimum_area, seam_contrast, partial=True)
+                parts = [part for part in parts if np.count_nonzero(part & floor) >= minimum_area
+                    and not ((y1 == 0 and part[0].any()) or (y2 == height and part[-1].any())
+                             or (x1 == 0 and part[:, 0].any()) or (x2 == width and part[:, -1].any()))]
+            if not parts:
                 continue
             if group.startswith('neutral_') and any(not _has_neutral_split_outline(local_image, part, region, floor)
                                                     for part in parts):
                 continue
+            leftover = region & ~np.any(parts, axis=0)
+            if leftover.any():
+                bx, by, bw, bh = cv2.boundingRect(leftover.astype(np.uint8))
+                blocking.append({'box_roi': [x1 + bx, y1 + by, x1 + bx + bw, y1 + by + bh],
+                                 'group': group, 'area': int(np.count_nonzero(leftover)),
+                                 'reason': 'unresolved_after_supported_split'})
             for part in parts:
                 ys, xs = np.nonzero(part)
                 box = [max(0, int(xs.min()) + x1 - 2), max(0, int(ys.min()) + y1 - 2),
@@ -259,6 +323,8 @@ class TrayForegroundDetector:
         split_hints = tuple(_tray_split_hints(self.pale_hints, frame.shape[1], frame.shape[0]))
         strong_hints = tuple(box for box, score in split_hints if score >= .72)
         secondary_hints = tuple(box for box, score in split_hints if score < .72)
+        confirmed_warm = tuple(box for box, _ in _tray_split_hints(
+            self.confirmed_warm_hints, frame.shape[1], frame.shape[0], minimum_confidence=.4))
         for group, unmasked in masks:
             if group=='cyan_gray':
                 # Recover pale patches of an already substantial, well-lit
@@ -318,10 +384,11 @@ class TrayForegroundDetector:
                 # another strand. Require its own long thin body as well.
                 if radius <= 12 and length >= 60 and length/max(1.,2*radius) >= 4:
                     cable_labels.add(int(label))
-            if group in SPLIT_GROUPS and len(strong_hints) >= 2:
+            if group in SPLIT_GROUPS and (len(strong_hints) >= 2 or
+                                          (group == 'warm' and confirmed_warm and strong_hints)):
                 self._add_model_splits(group, quantized, nhsv, delta_v, cleaned, raw_labels,
-                                       raw_stats, cable_labels, (strong_hints, secondary_hints), minimum_area, detections,
-                                       merged_mask)
+                                       raw_stats, cable_labels, (strong_hints, secondary_hints), minimum_area,
+                                       detections, blocking, merged_mask, confirmed_warm)
             contours = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]
             raw_owners = {}
             for contour in contours:

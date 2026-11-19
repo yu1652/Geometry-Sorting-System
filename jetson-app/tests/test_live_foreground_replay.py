@@ -9,7 +9,7 @@ from app import QApplication
 import cv2
 import numpy as np
 import linux_20261107 as release
-from live_vision import LiveVisionWorker
+from live_vision import LiveVisionWorker, _confirmed_warm_hints, locate_tray_frame
 from motion_limits import MACHINE_REGION, position_in_machine
 from tray_background import TrayBackgroundReference
 from xy_calibration import CalibrationPoint, XYCalibration
@@ -113,6 +113,44 @@ class RealForegroundWorkerReplayTests(unittest.TestCase):
         self.assertIsNone(target)
         self.assertEqual(trace['candidates'],[])
         self.assertIsNone(trace['hold_reason'])
+
+    def test_warm_recheck_runs_on_the_same_frame_before_using_a_boundary_target(self):
+        frame = np.zeros((480, 640, 3), np.uint8)
+        locator = MagicMock(roi=(16, 4, 624, 476))
+        locator.last_diagnostics = {'selection_status': 'selected_forced_boundary'}
+        locator.detector.last_diagnostics = {'blocking_regions': [{
+            'group': 'warm', 'reason': 'oversized_or_possible_joined_parts',
+            'box_roi': (280, 181, 621, 444),
+        }]}
+        previous = (193.5, 86.0)
+        refined = (140.0, 60.0)
+        locator.locate.side_effect = [previous, refined]
+        with patch('live_vision._confirmed_warm_hints', return_value=[(375, 189, 444, 269, .48)]) as recheck:
+            self.assertEqual(locate_tray_frame(locator, frame, None, (), True), refined)
+        recheck.assert_called_once_with(None, frame, (), [(296, 185, 637, 448)], True)
+        self.assertEqual(locator.detector.confirmed_warm_hints, ((359, 185, 428, 265, .48),))
+        self.assertEqual(locator.locate.call_count, 2)
+        self.assertTrue(all(args[0][0] is frame for args in locator.locate.call_args_list))
+
+        locator.locate.reset_mock(side_effect=True)
+        locator.locate.return_value = previous
+        with patch('live_vision._confirmed_warm_hints', return_value=[]) as recheck:
+            self.assertEqual(locate_tray_frame(locator, frame, None, (), True), previous)
+        recheck.assert_called_once()
+        locator.locate.assert_called_once_with(frame)
+
+    def test_weak_recheck_box_requires_two_views_at_the_same_original_coordinates(self):
+        frame = np.zeros((480, 640, 3), np.uint8)
+        regions = [(296, 185, 637, 448)]
+        rotated = [(188.625, 195.5625, 269.375, 264.9375, .482)]
+        flipped = [(201.75, 194, 267.75, 272, .26)]
+        for second, expected_count in ((flipped, 1), ([], 0)):
+            with self.subTest(second=second), patch('live_vision.TrayDetector') as model:
+                model.return_value.detect.side_effect = (rotated, second)
+                result = _confirmed_warm_hints(None, frame, (), regions, True)
+                self.assertEqual(len(result), expected_count)
+                if result:
+                    np.testing.assert_allclose(result[0], (375.0625, 188.625, 444.4375, 269.375, .482))
 
     def test_unmatched_reference_is_reported_as_hold_through_actual_worker(self):
         reference=np.full((480,640,3),200,np.uint8)

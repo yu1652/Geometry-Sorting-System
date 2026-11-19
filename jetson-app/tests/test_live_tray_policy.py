@@ -127,7 +127,8 @@ class LiveTrayPolicyTests(unittest.TestCase):
         output = release_output(((170, 200, 20, 20, .860), (220, 200, 40, 40, .359),
                                  (360, 200, 40, 40, .836)))
         worker = window.vision = self.worker(output, tray_feature_input=True,
-                                            tray_compensation=release.TRAY_COMPENSATION)
+                                            tray_compensation=release.TRAY_COMPENSATION,
+                                            tray_contact_ignore_unresolved=release.TRAY_CONTACT_IGNORE_UNRESOLVED)
         results, failures, sent = [], [], []
         window.machine._send = sent.append
 
@@ -199,4 +200,34 @@ class LiveTrayPolicyTests(unittest.TestCase):
 
         window.vision = LegacyWorker()
         self.assertTrue(window.manual_locate())
+
+    def locating_window(self):
+        window = self.linux_window({'box': [200, 100, 300, 250], 'inset_percent': 18})
+        sent = []
+        window.machine._send = sent.append
+        window.machine.begin_handshake()
+        for line in ('PONG', 'VERSION,ESP32_SORTER_XY_PUSHER,0.1.0',
+                     'STATUS,MCU,WAIT_START,0,0,77'):
+            window.machine.handle_mcu(line)
+        self.assertEqual(window.machine.snapshot().state, 'armed')
+        self.assertTrue(window.machine.start())
+        for line in ('STATUS,HOST_READY', 'STATUS,START', 'PUSH?'):
+            window.machine.handle_mcu(line)
+        self.assertEqual(window.machine.snapshot().state, 'locating')
+        sent.clear()
+        return window, sent
+
+    def test_automatic_location_waits_for_the_next_request_when_there_is_no_target(self):
+        window, sent = self.locating_window()
+        with patch.object(window, '_automatic_ready', return_value=True):
+            for token in (40, 41):
+                window._job = (token, window.machine.epoch, 'locate')
+                window.on_located(token, None)
+                self.assertEqual(window.machine.snapshot().state, 'running')
+                window.machine.handle_mcu('PUSH?')
+                self.assertEqual(window.machine.snapshot().state, 'locating')
+            window._job = (42, window.machine.epoch, 'locate')
+            window.on_located(42, (101, 50))
+        self.assertEqual(sent, ['PUSH,WAIT', 'PUSH,WAIT', 'PUSH,101.000,50.000,mm'])
+        self.assertEqual(window.machine.snapshot().state, 'wait_scan')
 

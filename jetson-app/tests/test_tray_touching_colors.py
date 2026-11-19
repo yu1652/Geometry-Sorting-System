@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 import cv2
 import numpy as np
-from tray_foreground import TrayForegroundDetector
+from tray_foreground import SPLIT_REASON, TrayForegroundDetector
 
 FIXTURES=Path(__file__).parent/'fixtures/tray_glare_20261116'
 
@@ -69,6 +69,40 @@ class TouchingColorTests(unittest.TestCase):
                 self.assertTrue(all(c['reason'] == 'model_and_visible_color_boundary'
                                     for c in detector.last_diagnostics['candidates']))
                 self.assertEqual(detector.last_diagnostics['blocking_regions'], [])
+
+    def test_warm_part_isolated_from_a_component_with_a_clipped_neighbour(self):
+        reference = cv2.imread(str(FIXTURES / 'reference.png'))
+        frame = cv2.imread(str(FIXTURES.parent / 'tray_20261119' / 'touching_warm.png'))
+        hints = [(289.375, 220.875, 387.625, 343.125, .86),
+                 (178.75, 362.0, 305.25, 470.5, .82),
+                 (356.625, 218.25, 423.375, 290.25, .81)]
+        detector = TrayForegroundDetector(reference, pale_hints=hints)
+        detector.detect(frame)
+        isolated = [item['box_roi'] for item in detector.last_diagnostics['candidates']
+                    if item['group'] == 'warm' and item['reason'] == SPLIT_REASON]
+        self.assertTrue(any(np.allclose(box, (355, 220, 424, 298), atol=7) for box in isolated), isolated)
+        self.assertTrue(any(block['reason'] == 'unresolved_after_supported_split' and block['box_roi'][3] == 480
+                            for block in detector.last_diagnostics['blocking_regions']))
+
+    def test_rechecked_yellow_piece_can_be_separated_with_its_visible_boundary(self):
+        reference = cv2.imread(str(FIXTURES / 'reference.png'))
+        frame = cv2.imread(str(FIXTURES.parent / 'tray_20261119' / 'touching_yellow.png'))
+        original = [(439, 210.5, 604, 360.5, .88), (443.5, 354.875, 559, 451.125, .85),
+                    (299.625, 186.5, 402.375, 313.5, .84)]
+        confirmed = [(375.0625, 188.625, 444.4375, 269.375, .482)]
+        expected = (380, 203, 447, 275)
+        detector = TrayForegroundDetector(reference, pale_hints=original, confirmed_warm_hints=confirmed)
+        detector.detect(frame)
+        candidates = detector.last_diagnostics['candidates']
+        self.assertTrue(any(c['reason'] == SPLIT_REASON and np.allclose(c['box_roi'], expected, atol=8)
+                            for c in candidates), [c['box_roi'] for c in candidates])
+        self.assertTrue(any(r['reason'] == 'unresolved_after_supported_split'
+                            for r in detector.last_diagnostics['blocking_regions']))
+
+        detector = TrayForegroundDetector(reference, pale_hints=original)
+        detector.detect(frame)
+        self.assertFalse(any(np.allclose(c['box_roi'], expected, atol=8)
+                             for c in detector.last_diagnostics['candidates']))
 
     def test_both_layouts_survive_exposure_changes_and_detector_restarts(self):
         ref=cv2.imread(str(FIXTURES/'reference.png'))

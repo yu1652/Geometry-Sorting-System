@@ -19,6 +19,51 @@ from tray_locator import TrayDetector, TrayLocator
 ROOT = Path(__file__).resolve().parent
 
 
+def _confirmed_warm_hints(backend, frame, original, regions, feature_input):
+    from vision import _box_iou
+
+    height, width = frame.shape[:2]
+    rotated = TrayDetector(backend, confidence=.4, feature_input=feature_input)
+    probes = []
+    for a, b, c, d, score in rotated.detect(cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)):
+        box = (width - d, a, width - b, c)
+        x1, y1, x2, y2 = box
+        if not (0 < x1 < x2 < width and 0 < y1 < y2 < height):
+            continue
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        if (any(l <= cx <= r and t <= cy <= z for l, t, r, z in regions)
+                and not any(_box_iou(box, hint[:4]) >= .55 for hint in original)):
+            probes.append(box + (score,))
+    flipped = []
+    if any(box[4] < .72 for box in probes):
+        model = TrayDetector(backend, confidence=.25, feature_input=feature_input)
+        flipped = [(width - c, b, width - a, d)
+                   for a, b, c, d, _ in model.detect(cv2.flip(frame, 1))]
+    return [box for box in probes if box[4] >= .72
+            or any(_box_iou(box[:4], other) >= .65 for other in flipped)]
+
+
+def locate_tray_frame(locator, frame, backend, original_hints, feature_input):
+    target = locator.locate(frame)
+    if target is not None and locator.last_diagnostics.get('selection_status') != 'selected_forced_boundary':
+        return target
+    x, y = locator.roi[:2]
+    regions = [(a + x, b + y, c + x, d + y)
+               for region in locator.detector.last_diagnostics.get('blocking_regions', ())
+               if region.get('group') == 'warm' and region.get('reason') == 'oversized_or_possible_joined_parts'
+               for a, b, c, d in [region['box_roi']]]
+    if not regions:
+        return target
+    confirmed = _confirmed_warm_hints(backend, frame, original_hints, regions, feature_input)
+    if not confirmed:
+        return target
+    locator.detector.confirmed_warm_hints = tuple((a - x, b - y, c - x, d - y, score)
+                                                 for a, b, c, d, score in confirmed)
+    target = locator.locate(frame)
+    locator.last_diagnostics['warm_recheck_hint_count'] = len(confirmed)
+    return target
+
+
 def open_live_capture(path, report=None):
     """Request a bounded-bandwidth format from the Linux V4L2 driver."""
     capture = cv2.VideoCapture(path, cv2.CAP_V4L2)
@@ -314,10 +359,13 @@ class LiveVisionWorker(QThread):
                                               column_boundaries=column_boundaries,
                                               motion_target_only=motion_target_only,
                                               pusher_width_mm=25.0 if reference_path is not None and motion_target_only else None,
-                                              contact_ignore_unresolved=self.tray_contact_ignore_unresolved,
+                                              contact_ignore_unresolved=self.tray_contact_ignore_unresolved and motion_target_only,
                                               contact_side_clearance_mm=self.tray_contact_side_clearance_mm,
                                               contact_allow_sweep_mm2=self.tray_contact_allow_sweep_mm2)
-                        target = locator.locate(top.copy())
+                        if reference_path is not None:
+                            target = locate_tray_frame(locator, top.copy(), tray_backend, hints, self.tray_feature_input)
+                        else:
+                            target = locator.locate(top.copy())
                         if not self._stopping.is_set():
                             evidence = {'captures': {'top': top},
                                         'locator': deepcopy(getattr(locator, 'last_diagnostics', {})),
