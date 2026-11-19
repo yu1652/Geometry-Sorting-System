@@ -405,6 +405,14 @@ class ColorTests(unittest.TestCase):
             result = classify_hsv(frame, mask, (0, 0, 10, 10), COLOR_CONFIG)
             self.assertEqual((result.name, result.confidence, result.valid_pixels), (expected, 1.0, 100))
 
+    def test_classify_hsv_treats_low_value_color_cast_as_black(self):
+        """Catches hue noise on very dark plastic excluding it from black."""
+        frame = np.full((10, 10, 3), [20, 5, 5], dtype=np.uint8)
+
+        result = classify_hsv(frame, np.ones((10, 10), dtype=bool), (0, 0, 10, 10), COLOR_CONFIG)
+
+        self.assertEqual((result.name, result.confidence, result.valid_pixels), ("黑色", 1.0, 100))
+
     def test_classify_hsv_returns_unknown_for_insufficient_or_low_majority_pixels(self):
         """Catches noisy tiny masks and mixed-color regions being reported as confident."""
         frame = np.full((10, 10, 3), [0, 0, 255], dtype=np.uint8)

@@ -174,7 +174,7 @@ def _load_cuda_runtime():
         return _cuda_runtime
 
 
-def create_backend(engine_path, model_kind, device=0):
+def create_backend(engine_path, model_kind, device=0, side_class_count=None):
     """Load native dependencies and create a backend on the calling thread."""
 
     try:
@@ -196,7 +196,7 @@ def create_backend(engine_path, model_kind, device=0):
         model_kind,
         trt_module,
         cuda_runtime,
-        device=device,
+        device=device, side_class_count=side_class_count,
     )
     backend.provenance = provenance
     return backend
@@ -211,9 +211,12 @@ def _shape_nbytes(shape, dtype):
 class TensorRTBackend:
     """One synchronous TensorRT engine owned by one worker thread."""
 
-    def __init__(self, engine_bytes, model_kind, trt_module, cuda_runtime, device=0):
-        if model_kind not in ("yolo", "yolo_legacy", "yolo_win8", "yolo_butu24", "tray", "mask"):
+    def __init__(self, engine_bytes, model_kind, trt_module, cuda_runtime, device=0, side_class_count=None):
+        if model_kind not in ("yolo", "yolo_legacy", "yolo_win8", "yolo_butu24", "yolo_side", "tray", "mask"):
             raise ValueError("unsupported model_kind")
+        if model_kind == 'yolo_side' and (type(side_class_count) is not int or not 1 <= side_class_count <= 1000):
+            raise ValueError('side_class_count must be in [1,1000]')
+        self._side_class_count = side_class_count
         if int(device) != 0:
             raise ValueError("this backend is fixed to CUDA device 0")
         self.model_kind = model_kind
@@ -321,6 +324,9 @@ class TensorRTBackend:
             elif self.model_kind == "yolo_win8":
                 expected_input_shape = _YOLO_LEGACY_INPUT_SHAPE
                 expected_output_shape = _YOLO_WIN8_OUTPUT_SHAPE
+            elif self.model_kind == "yolo_side":
+                expected_input_shape = _INPUT_SHAPE
+                expected_output_shape = (1, 4 + self._side_class_count, 2100)
             elif self.model_kind == "yolo_butu24":
                 expected_input_shape = _INPUT_SHAPE
                 expected_output_shape = _YOLO_BUTU24_OUTPUT_SHAPE
@@ -376,8 +382,8 @@ class TensorRTBackend:
                 )
 
         try:
-            input_dtype = np.dtype(self._trt.nptype(engine.get_binding_dtype(input_index)))
-            output_dtype = np.dtype(self._trt.nptype(engine.get_binding_dtype(output_index)))
+            input_dtype = self._binding_numpy_dtype(engine.get_binding_dtype(input_index))
+            output_dtype = self._binding_numpy_dtype(engine.get_binding_dtype(output_index))
         except (KeyError, TypeError, ValueError) as exc:
             raise EngineContractError("unsupported TensorRT binding dtype: %s" % exc) from exc
         if input_dtype.kind != "f" or output_dtype.kind != "f":
@@ -388,6 +394,15 @@ class TensorRTBackend:
         self.input_shape = expected_input_shape
         self.input_dtype = input_dtype
         self.output_dtype = output_dtype
+
+    def _binding_numpy_dtype(self, dtype):
+        # TRT 8.5.2 nptype builds a map containing removed np.bool even for FLOAT.
+        # Use the native enum directly, without altering NumPy or TRT globally.
+        for name, numpy_type in (('float32', np.float32), ('float16', np.float16),
+                                 ('int8', np.int8), ('int32', np.int32), ('bool', np.bool_)):
+            if hasattr(self._trt, name) and dtype == getattr(self._trt, name):
+                return np.dtype(numpy_type)
+        return np.dtype(self._trt.nptype(dtype))
 
     def _configure_dynamic_shape(self):
         profile_ok = self.context.set_optimization_profile_async(0, int(self.stream))

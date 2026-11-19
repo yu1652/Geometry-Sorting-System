@@ -29,19 +29,13 @@ def make_recognizer():
     from trt_backend import create_backend
 
     config = yaml.safe_load((ROOT / 'legacy_vision.yaml').read_text(encoding='utf8'))
-    config['surface_mask']['enabled'] = True
+    config['surface_mask']['enabled'] = False
     config['surface_mask']['input_mode'] = 'legacy_features'
     detector = create_backend(MODEL_DIR / 'shape_detector_fp16.engine', 'yolo_butu24')
     try:
-        segmenter = create_backend(MODEL_DIR / 'surface_mask_fp16.engine', 'mask')
-    except Exception:
-        detector.close()
-        raise
-    try:
-        return LegacyRecognizer(detector, segmenter, CLASS_NAMES, config,
+        return LegacyRecognizer(detector, None, CLASS_NAMES, config,
                                 expected_count=24, capture_color_sample=True,
                                 per_view_features=True)
     except Exception:
-        segmenter.close()
         detector.close()
         raise

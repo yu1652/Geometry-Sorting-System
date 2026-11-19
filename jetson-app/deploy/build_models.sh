@@ -9,6 +9,10 @@ if [[ ! -x "$trtexec" ]]; then
 fi
 
 model_dir=models
+tray_source=tray_object_detector
+if [[ "${YLERS_TRT_JP4:-0}" == 1 ]]; then
+    tray_source=tray_object_detector_jp4
+fi
 sources=(SHAPE tray_object_detector surface_mask)
 surface_shapes=(--minShapes=input:1x3x320x320 --optShapes=input:1x3x320x320 --maxShapes=input:1x3x320x320)
 if [[ "${1:-}" == --linux-20261107 && $# == 1 ]]; then
@@ -50,7 +54,7 @@ if [[ "$model_dir" == models/butu_20261110 ]]; then
     check_model_hash "$model_dir" shape_detector.onnx
     check_model_hash "$model_dir" surface_mask.onnx
     # This profile shares only the tray model with Linux 20261107.
-    check_model_hash "$tray_dir" tray_object_detector.onnx
+    check_model_hash "$tray_dir" "$tray_source.onnx"
 elif [[ -f "$model_dir/onnx-sha256.txt" ]]; then
     (cd "$model_dir" && sha256sum -c onnx-sha256.txt)
 fi
@@ -81,7 +85,7 @@ build() {
 if [[ "$model_dir" == models/butu_20261110 ]]; then
     build shape_detector shape_detector_fp16.engine
     build surface_mask surface_mask_fp16.engine "${surface_shapes[@]}"
-    (model_dir="$tray_dir"; build tray_object_detector tray_object_detector_fp16.engine)
+    (model_dir="$tray_dir"; build "$tray_source" tray_object_detector_fp16.engine)
     exit 0
 elif [[ "$model_dir" == models/linux_20261107 ]]; then
     build shape_detector shape_detector_fp16.engine

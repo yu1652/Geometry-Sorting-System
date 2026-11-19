@@ -1,8 +1,8 @@
 """Independent scene evidence against an explicitly recorded empty reference.
 
-Thresholds are conservative starting points for on-site acceptance testing, not
-proof that every object is perceptible. This module never consults detector
-outputs and never learns an empty scene implicitly.
+Compare spatial structure after removing smooth illumination differences. The
+original colour frames and the manually recorded background remain unchanged;
+this is independent of detector outputs and never learns an empty scene implicitly.
 """
 
 from collections.abc import Mapping
@@ -31,6 +31,65 @@ class PresenceResult:
 
 _ROLES = ('left', 'right')
 _MAX_REFERENCE_BYTES = 5_000_000
+_CLEANUP_KERNEL = np.ones((7, 7), np.uint8)
+
+
+def _components(mask, clean=False):
+    mask = mask.astype(np.uint8)
+    if clean:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _CLEANUP_KERNEL)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    return float(mask.mean()), int(stats[1:, cv2.CC_STAT_AREA].max()) if count > 1 else 0
+
+
+def _local_contrast(gray):
+    mean = cv2.GaussianBlur(gray, (0, 0), 4)
+    variance = cv2.GaussianBlur(gray * gray, (0, 0), 4) - mean * mean
+    return np.sqrt(np.maximum(variance, 0))
+
+
+def _assess_view(current, reference):
+    current = cv2.GaussianBlur(current.astype(np.float32), (5, 5), 0)
+    reference = cv2.GaussianBlur(reference.astype(np.float32), (5, 5), 0)
+    delta = current - reference
+    raw_difference = np.max(np.abs(delta), axis=2)
+    # Remove only smooth shading/colour offsets. Object boundaries remain in
+    # the residual even when an object's uniform interior follows this field.
+    illumination = cv2.GaussianBlur(delta, (0, 0), 8)
+    residual = np.max(np.abs(delta - illumination), axis=2)
+    ratio, largest = _components(residual > 14, clean=True)
+    weak_ratio, weak_largest = _components(residual > 10, clean=True)
+    _, sharp_largest = _components(residual > 65)
+    gray_current = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
+    gray_reference = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY)
+    reference_contrast = _local_contrast(gray_reference)
+    current_contrast = _local_contrast(gray_current)
+    # A low-contrast object can hide background texture without a strong edge.
+    # Require a coherent region, rather than individual disappearing noise dots.
+    texture_ratio, texture_largest = _components(
+        (reference_contrast > 4) & (current_contrast < .35 * reference_contrast), clean=True)
+    lighting_shift = float(np.max(np.abs(np.median(delta[::4, ::4], axis=(0, 1)))))
+    clipped_ratio = float(((gray_current <= 2) | (gray_current >= 253)).mean())
+    scores = {'method': 'illumination_structure_v2',
+              'changed_ratio': ratio, 'largest_component': largest,
+              'mean_difference': float(raw_difference.mean()),
+              'residual_mean': float(residual.mean()),
+              'weak_changed_ratio': weak_ratio, 'weak_largest_component': weak_largest,
+              'texture_loss_ratio': texture_ratio, 'texture_loss_component': texture_largest,
+              'sharp_component': sharp_largest, 'lighting_shift': lighting_shift,
+              'clipped_ratio': clipped_ratio}
+    # Extreme exposure/clipping or broad structural disagreement still needs
+    # inspection. Never adapt the stored reference to an unconfirmed scene.
+    if lighting_shift > 55 or clipped_ratio > .20 or ratio > .25:
+        return 'unknown', 'exposure or background structure changed too much', scores
+    # At 640x480, a 7x7 opening removes narrow glints/noise; a surviving region
+    # of 96 pixels is occupied evidence. Test physical objects and field frames
+    # when changing these spatial thresholds, not just detector confidence.
+    if largest >= 96 or texture_largest >= 1600:
+        return 'occupied', 'coherent object boundary or background texture occlusion', scores
+    if weak_largest >= 480 or sharp_largest >= 4:
+        return 'unknown', 'localized scene change needs confirmation', scores
+    return 'empty', 'background structure matches after illumination compensation', scores
 
 
 def _sources(sources):
@@ -119,42 +178,12 @@ class EmptySceneReference:
         for role in _ROLES:
             current = images[role]
             reference = backgrounds[role]
-            # Blur suppresses ordinary sensor noise. Channelwise differences
-            # retain colour changes even for objects with similar grey levels.
-            blurred_current = cv2.GaussianBlur(current.astype(np.float32), (5, 5), 0)
-            blurred_reference = cv2.GaussianBlur(reference.astype(np.float32), (5, 5), 0)
-            difference = np.max(np.abs(blurred_current - blurred_reference), axis=2)
-            changed = (difference > 14).astype(np.uint8)
-            ratio = float(changed.mean())
-            mean_difference = float(difference.mean())
-            count, _, stats, _ = cv2.connectedComponentsWithStats(changed, connectivity=8)
-            largest = int(stats[1:, cv2.CC_STAT_AREA].max()) if count > 1 else 0
-            # A strong threshold alone misses a low-contrast object that covers
-            # texture without changing average brightness. Coherent differences
-            # above the tested +/-2 sensor noise range make emptiness uncertain.
-            weak_changed = (difference > 3).astype(np.uint8)
-            weak_ratio = float(weak_changed.mean())
-            weak_count, _, weak_stats, _ = cv2.connectedComponentsWithStats(weak_changed, connectivity=8)
-            weak_largest = int(weak_stats[1:, cv2.CC_STAT_AREA].max()) if weak_count > 1 else 0
+            state, reason, score = _assess_view(current, reference)
             raw_peak = int(np.abs(current.astype(np.int16) - reference.astype(np.int16)).max())
-            scores[role] = {'changed_ratio': ratio, 'largest_component': largest,
-                            'mean_difference': mean_difference, 'raw_peak': raw_peak,
-                            'weak_changed_ratio': weak_ratio, 'weak_largest_component': weak_largest}
-            # Widespread differences indicate changed lighting/camera position
-            # rather than dependable evidence of an object or an empty scene.
-            if weak_ratio > .30 or ratio > .30 or mean_difference > 25:
-                states.append('unknown')
-            elif largest >= 12 or ratio > .00015:
-                states.append('occupied')
-            # Keep sparse high-contrast changes ambiguous instead of confidently
-            # discarding a tiny object as sensor noise. Both area tests and this
-            # raw guard are needed: Gaussian smoothing can hide a single pixel.
-            elif weak_largest >= 12 or largest > 0 or raw_peak > 35:
-                states.append('unknown')
-            else:
-                states.append('empty')
+            scores[role] = dict(score, raw_peak=raw_peak, state=state, reason=reason)
+            states.append(state)
         if 'occupied' in states:
             return result('occupied', 'local scene change in at least one view', scores)
         if 'unknown' in states:
-            return result('unknown', 'global, weak or sparse ambiguous scene change', scores)
-        return result('empty', 'both views match the recorded empty scene', scores)
+            return result('unknown', 'exposure, structure or localized change needs confirmation', scores)
+        return result('empty', 'both views match the empty scene after illumination compensation', scores)

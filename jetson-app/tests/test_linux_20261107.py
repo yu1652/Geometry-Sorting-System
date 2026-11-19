@@ -1,21 +1,27 @@
 import tempfile
+import json
 import time
 import unittest
+from zipfile import ZipFile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
-from app import QApplication
+from app import QApplication, QMessageBox
 from live_console import LiveWindow
-from scene_presence import PresenceResult
 
 
 APP = QApplication.instance() or QApplication([])
 
 
 class Linux20261107Tests(unittest.TestCase):
+    def setUp(self):
+        confirm = patch.object(LiveWindow, '_ask_origin_unchanged', return_value=True, create=True)
+        confirm.start()
+        self.addCleanup(confirm.stop)
+
     def test_release_uses_actual_model_order_and_distinct_engine_files(self):
         from linux_20261107 import CLASS_NAMES, make_recognizer, make_tray_backend
         self.assertEqual(CLASS_NAMES, ('wlz', 'llz', 'zft', 'slz', 'yzhu', 'yzhui', 'smt', 'qiu'))
@@ -23,11 +29,11 @@ class Linux20261107Tests(unittest.TestCase):
         with patch('trt_backend.create_backend', return_value=backend) as create:
             recognizer = make_recognizer()
             self.assertEqual(recognizer._class_names, CLASS_NAMES)
-            self.assertEqual(create.call_args.kwargs['model_kind'], 'yolo_win8')
-            self.assertEqual(create.call_args.args[0].parent.name, 'linux_20261107')
+            self.assertEqual(create.call_args[1]['model_kind'], 'yolo_win8')
+            self.assertEqual(create.call_args[0][0].parent.name, 'linux_20261107')
             self.assertIs(make_tray_backend(), backend)
-            self.assertEqual(create.call_args.kwargs['model_kind'], 'tray')
-            self.assertEqual(create.call_args.args[0].parent.name, 'linux_20261107')
+            self.assertEqual(create.call_args[1]['model_kind'], 'tray')
+            self.assertEqual(create.call_args[0][0].parent.name, 'linux_20261107')
 
     def test_butu_uses_new_class_order_and_separate_round_with_same_safety_protocol(self):
         from butu_20261110 import CLASS_NAMES
@@ -83,7 +89,7 @@ class Linux20261107Tests(unittest.TestCase):
             finally:
                 window.close()
 
-    def test_butu_round_repushes_empty_then_sorts_twelve_into_six_bins(self):
+    def test_butu_round_sorts_twelve_into_six_bins_without_background_checks(self):
         with tempfile.TemporaryDirectory() as folder:
             window = LiveWindow(data_dir=folder, butu_24=True)
             machine = window.machine
@@ -99,12 +105,10 @@ class Linux20261107Tests(unittest.TestCase):
                 window.save_calibration(window.calibration_rows)
                 window.calibration_confirmed.setChecked(True)
                 window.vision = SimpleNamespace(capture_empty=lambda _: True,
-                                                locate=lambda *a: True,
+                                                locate=lambda *a, **kw: True,
                                                 recognize=lambda *a, **kw: True)
                 window._frames_at = time.monotonic()
                 window._models_warm = True
-                window.empty_reference = SimpleNamespace(assess=lambda frames, _: PresenceResult(
-                    'empty' if frames is window.frames else 'occupied', 'replay', {}))
                 self.assertTrue(window.start())
                 self.assertTrue(machine.handle_mcu('STATUS,HOST_READY'))
                 self.assertTrue(machine.handle_mcu('STATUS,START'))
@@ -126,11 +130,6 @@ class Linux20261107Tests(unittest.TestCase):
                             diagnostics={'captures': captures})
                         window.on_recognized(window._job[0], result)
 
-                reach_scan()
-                scan(None, None, window.frames, 3)
-                self.assertEqual(sent[-1], 'PUSH,WAIT')
-                self.assertEqual(window.auto_bins.total, 0)
-                self.assertEqual(window.bindings, {})
                 shapes = ('ban_yuan_zhu', 'san_leng_zhu', 'si_leng_zhu',
                           'si_leng_zhui', 'wu_leng_zhu', 'yuan_zhu')
                 color = SimpleNamespace(name='蓝色', confidence=.9, valid_pixels=120)
@@ -140,11 +139,9 @@ class Linux20261107Tests(unittest.TestCase):
                     scan(SimpleNamespace(class_name=shape, confidence=.9), color, dict(window.frames), 2)
                     self.assertEqual(sent[-1], 'SORT,%d' % (item % 6 + 1))
                     self.assertTrue(machine.handle_mcu('DONE'))
-                    self.assertFalse(machine.handle_mcu('PUSH?'))
-                    for check in range(3):
-                        window._dispatch_vision()
-                        window.on_empty_reference(window._job[0], window.frames)
-                        self.assertEqual(window.auto_bins.total, item + int(check == 2))
+                    self.assertEqual(machine.snapshot().completed_count, item + 1)
+                    window.record_completion()
+                    self.assertEqual(window.auto_bins.total, item + 1)
                 self.assertEqual(window.auto_bins.counts, (2, 2, 2, 2, 2, 2))
                 self.assertEqual(machine.snapshot().state, 'stopped')
                 self.assertFalse(machine.handle_mcu('PUSH?'))
@@ -154,7 +151,7 @@ class Linux20261107Tests(unittest.TestCase):
                 machine.disconnect()
                 window.close()
 
-    def exercise_drop(self, previous_count):
+    def exercise_done(self, previous_count):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         window = LiveWindow(data_dir=directory.name, linux_20261107=True)
@@ -173,7 +170,6 @@ class Linux20261107Tests(unittest.TestCase):
         window.calibration_confirmed.setChecked(True)
         window.vision = SimpleNamespace(capture_empty=lambda token: True)
         window._frames_at = time.monotonic()
-        window.empty_reference = SimpleNamespace(assess=lambda *a: PresenceResult('empty', 'test', {}))
         for _ in range(previous_count):
             window.auto_bins.complete(window.auto_bins.reserve('wlz', '蓝色'))
         self.assertFalse(window.start())
@@ -189,21 +185,19 @@ class Linux20261107Tests(unittest.TestCase):
                              SimpleNamespace(preview_bgr=np.zeros((320, 640, 3), np.uint8)))
         machine.provide_sort(bin_id)
         machine.handle_mcu('DONE')
-        self.assertFalse(machine.handle_mcu('PUSH?'))
-        for index in range(3):
-            window._dispatch_vision()
-            token = window._job[0]
-            window.on_empty_reference(token, window.frames)
-            self.assertEqual(window.auto_bins.total, previous_count + int(index == 2))
+        self.assertEqual(machine.snapshot().completed_count, 1)
+        window.record_completion()
+        self.assertEqual(window.auto_bins.total, previous_count + 1)
+        self.assertIsNone(window._job)
         self.assertTrue((Path(directory.name) / 'live_auto_bins_20261107.json').is_file())
         return window
 
-    def test_drop_holds_new_push_and_only_counts_after_three_fresh_empty_checks(self):
-        window = self.exercise_drop(0)
+    def test_done_counts_and_allows_next_push_without_background_capture(self):
+        window = self.exercise_done(0)
         self.assertTrue(window.machine.handle_mcu('PUSH?'))
         self.assertEqual(window.machine.snapshot().state, 'locating')
 
-    def test_twelfth_cleared_drop_ends_round_before_another_push(self):
-        window = self.exercise_drop(11)
+    def test_twelfth_done_ends_round_before_another_push(self):
+        window = self.exercise_done(11)
         self.assertEqual(window.machine.snapshot().state, 'stopped')
         self.assertFalse(window.machine.handle_mcu('PUSH?'))

@@ -101,13 +101,17 @@ class RuntimeDiagnostics:
             raise ValueError('Could not encode diagnostic image: ' + name)
         bundle.writestr(name, encoded.tobytes())
 
-    def save_sample(self, result, context):
+    def save_sample(self, result, context, group=None):
         """Record detector evidence; pair images retain their original semantics.
 
         ``diagnostics`` may contain pair_bgr, features_bgr, raw_output and a
         captures mapping. In particular a preprocessed pair is never described
         or reconstructed as a raw colour capture.
+        ``group='tray'`` has its own retention budget so frequent locations
+        cannot evict the last recognition observations.
         """
+        if group not in (None, 'recognition', 'tray'):
+            raise ValueError('Unknown diagnostic sample group')
         metadata = {
             'detection': _fields(getattr(result, 'detection', None), ('class_id', 'class_name', 'confidence', 'box')),
             'color': _fields(getattr(result, 'color', None), ('name', 'confidence', 'valid_pixels')),
@@ -119,6 +123,9 @@ class RuntimeDiagnostics:
 
         def write(bundle):
             bundle.writestr('metadata.json', _json_bytes(metadata))
+            if diagnostics.get('tray') is not None:
+                bundle.writestr('tray.json', _json_bytes(diagnostics['tray']))
+            self._image(bundle, 'foreground_mask.png', diagnostics.get('foreground_mask'))
             reference_bytes = diagnostics.get('empty_reference_bytes')
             if reference_bytes is not None:
                 bundle.writestr('empty_reference.npz', reference_bytes)
@@ -139,7 +146,8 @@ class RuntimeDiagnostics:
                 self._image(bundle, name, frame)
 
         with self._lock:
-            return self._archive(self.data_dir / 'diagnostic_samples', 'sample', self.max_samples, write)
+            directory, prefix = ('diagnostic_tray_samples', 'tray') if group == 'tray' else ('diagnostic_samples', 'sample')
+            return self._archive(self.data_dir / directory, prefix, self.max_samples, write)
 
     @staticmethod
     def _safe_extra(path):
@@ -147,7 +155,7 @@ class RuntimeDiagnostics:
         sensitive = re.compile(r'(secret|password|credential|token|private|api[_.-]?key|\.env)', re.I)
         # This explicit local camera reference is part of scene diagnostics,
         # rather than a generic allowance for arbitrary NumPy/model archives.
-        empty_scene = path.name == 'recognition_empty.npz' and path.is_file() and path.stat().st_size <= 5_000_000
+        empty_scene = path.name in ('recognition_empty.npz', 'tray_background.npz') and path.is_file() and path.stat().st_size <= 5_000_000
         return (not path.is_symlink() and path.is_file()
                 and (path.suffix.lower() in allowed or empty_scene) and not sensitive.search(path.name))
 
@@ -163,10 +171,11 @@ class RuntimeDiagnostics:
                 path = self.data_dir / ('live_runtime.log' + suffix)
                 if path.is_file() and not path.is_symlink():
                     bundle.write(path, path.name)
-            samples = sorted((self.data_dir / 'diagnostic_samples').glob('sample_*.zip'))[-self.max_samples:]
-            for path in samples:
-                if path.is_file() and not path.is_symlink():
-                    bundle.write(path, 'diagnostic_samples/' + path.name)
+            for directory, prefix in (('diagnostic_samples', 'sample'), ('diagnostic_tray_samples', 'tray')):
+                samples = sorted((self.data_dir / directory).glob(prefix + '_*.zip'))[-self.max_samples:]
+                for path in samples:
+                    if path.is_file() and not path.is_symlink():
+                        bundle.write(path, directory + '/' + path.name)
             for index, file in enumerate(extra_files):
                 path = Path(file)
                 if self._safe_extra(path):

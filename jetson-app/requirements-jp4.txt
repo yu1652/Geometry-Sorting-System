@@ -1,0 +1,6 @@
+# Python 3.6 / ARM64. Qt5 is supplied by Ubuntu's python3-pyqt5.
+numpy==1.19.5
+opencv-python-headless==4.6.0.66
+PyYAML==6.0
+dataclasses==0.8
+pyserial==3.5

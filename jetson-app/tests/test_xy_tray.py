@@ -90,9 +90,9 @@ class TrayCompensationTests(unittest.TestCase):
         for position, expected in (
             ((80, 80), (84, 80)),
             ((40, 40), (44, 43)),
-            ((120, 120), (122, 117)),
-            ((160, 160), (160, 154)),
-            ((200, 200), (200, 194)),
+            ((120, 120), (124, 117)),
+            ((160, 160), (164, 154)),
+            ((200, 200), (204, 194)),
         ):
             with self.subTest(position=position):
                 np.testing.assert_allclose(self.locate(*position), expected, atol=1e-9)
@@ -124,6 +124,108 @@ class TrayCompensationTests(unittest.TestCase):
                 detector.detections = [(135, 75, 160, 85, .9), unsafe]
                 with self.assertRaisesRegex(ValueError, 'outside physical region'):
                     strict.locate(self.frame)
-                np.testing.assert_allclose(safe.locate(self.frame), (160, 93), atol=1e-9)
+                np.testing.assert_allclose(safe.locate(self.frame), (164, 93), atol=1e-9)
                 detector.detections = [unsafe]
                 self.assertIsNone(safe.locate(self.frame))
+
+
+class PushRearEdgeTests(unittest.TestCase):
+    def calibration(self, mapping, physical_region=(0, 0, 300, 300)):
+        return XYCalibration.fit(
+            [CalibrationPoint(x, y, *mapping(x, y)) for x in (0, 100, 200) for y in (0, 100, 200)],
+            pixel_region=(0, 0, 220, 220), physical_region=physical_region)
+
+    def locate(self, calibration, boxes, *, offsets=(4, 0), compensation=None, skip_unsafe=False):
+        class Detector:
+            def detect(self, image):
+                return boxes
+        return TrayLocator(calibration, Detector(), (0, 0, 220, 220), offsets,
+                           compensation=compensation, skip_unsafe=skip_unsafe).locate(
+                               np.zeros((220, 220, 3), np.uint8))
+
+    def test_forward_mapping_keeps_right_rear_edge_and_center_y(self):
+        calibration = self.calibration(lambda x, y: (x, y))
+        np.testing.assert_allclose(self.locate(calibration, [(40, 70, 80, 110, .9)]),
+                                   (84, 90), atol=1e-8)
+
+    def test_reversed_mapping_uses_left_image_edge_as_physical_rear(self):
+        calibration = self.calibration(lambda x, y: (220 - x, 220 - y))
+        np.testing.assert_allclose(self.locate(calibration, [(40, 70, 80, 110, .9)]),
+                                   (184, 130), atol=1e-8)
+
+    def test_quarter_turn_uses_four_corners_instead_of_left_right_midpoints(self):
+        calibration = self.calibration(lambda x, y: (y, 220 - x))
+        np.testing.assert_allclose(self.locate(calibration, [(40, 70, 80, 110, .9)]),
+                                   (114, 160), atol=1e-8)
+
+    def test_oblique_box_uses_maximum_x_corner_but_y_at_box_center(self):
+        calibration = self.calibration(lambda x, y: (.8 * x + .4 * y, 60 - .4 * x + .8 * y))
+        np.testing.assert_allclose(self.locate(calibration, [(40, 70, 80, 110, .9)]),
+                                   (112, 108), atol=1e-8)
+
+    def test_negative_old_compensation_cannot_cross_rear_gap_and_positive_still_applies(self):
+        calibration = self.calibration(lambda x, y: (x, y))
+        settings = dict(TrayCompensationTests.compensation)
+        box = [(100, 100, 120, 120, .9)]
+        np.testing.assert_allclose(self.locate(calibration, box, compensation=settings),
+                                   (124, 107.75), atol=1e-8)
+        settings['x_right'] = 4
+        np.testing.assert_allclose(self.locate(calibration, box, compensation=settings),
+                                   (126, 107.75), atol=1e-8)
+
+    def test_unsafe_rear_target_skips_candidate_without_clamping_in_front(self):
+        calibration = self.calibration(lambda x, y: (220 - x, y), physical_region=(0, 0, 200, 220))
+        # Wide first candidate has the smaller physical center X, but its rear
+        # plus the configured gap is outside the range. Select the safe piece.
+        boxes = [(40, 50, 200, 70, .9), (60, 80, 80, 100, .8)]
+        np.testing.assert_allclose(self.locate(calibration, boxes, offsets=(30, 0), skip_unsafe=True),
+                                   (190, 90), atol=1e-8)
+        self.assertIsNone(self.locate(calibration, boxes[:1], offsets=(30, 0), skip_unsafe=True))
+        with self.assertRaisesRegex(ValueError, 'outside physical region'):
+            self.locate(calibration, boxes[:1], offsets=(30, 0))
+
+    def test_multiple_candidates_keep_negative_x_physical_push_order(self):
+        calibration = self.calibration(lambda x, y: (220 - x, y))
+        np.testing.assert_allclose(self.locate(calibration,
+                                   [(20, 50, 40, 70, .99), (140, 80, 160, 100, .8)]),
+                                   (84, 90), atol=1e-8)
+
+    def test_latest_reversed_field_calibration_does_not_pick_truncated_front_edge(self):
+        # Nine manually adjusted points from the installed board; RGB silhouette
+        # has its green part around x375..550 and extends past the 535px ROI edge.
+        rows = [
+            (217.009, 110.4975, 181, 125), (351.03, 109.4975, 124.2, 124),
+            (486.051, 109.4975, 66, 124), (216.009, 243.325, 180, 66),
+            (350.03, 245.325, 123, 66), (486.051, 243.325, 66, 66),
+            (216.009, 377.1525, 180, 9), (350.03, 377.1525, 123, 9),
+            (483.051, 377.1525, 67, 9),
+        ]
+        calibration = XYCalibration.fit([CalibrationPoint(*row) for row in rows],
+            pixel_region=(16, 0, 535, 479), physical_region=(43.563, .125, 226.331, 164.027))
+
+        class Detector:
+            def detect(self, image):
+                return [(359, 269, 519, 432.478, .9)]
+
+        locator = TrayLocator(calibration, Detector(), (16, 0, 519, 479), offsets=(1, 0),
+                               compensation=TrayCompensationTests.compensation, skip_unsafe=True)
+        result = locator.locate(np.zeros((480, 640, 3), np.uint8))
+        self.assertIsNotNone(result)
+        # Legacy fixed-right calculation exactly reproduced PUSH 46.081,24.729;
+        # this candidate must start behind the part near X113, not its front.
+        self.assertGreater(result[0], 110)
+        projected = [calibration.project_pixel(x, y)[0]
+                     for x in (375, 535) for y in (269, 432.478)]
+        self.assertGreaterEqual(result[0] + 1e-9, max(projected) + 1)
+        self.assertAlmostEqual(result[1], 24.750955, delta=.03)
+        self.assertLess(calibration.project_pixel(375, 432.478)[1], 0)
+
+    def test_projected_corner_outside_motion_range_does_not_grant_motion_authority(self):
+        calibration = self.calibration(lambda x, y: (x, y), physical_region=(0, 40, 200, 160))
+        np.testing.assert_allclose(calibration.project_pixel(60, 180), (60, 180), atol=1e-8)
+        with self.assertRaisesRegex(ValueError, 'outside physical region'):
+            calibration.map_pixel(60, 180)
+        with self.assertRaisesRegex(ValueError, 'outside safe region'):
+            calibration.project_pixel(221, 100)
+        with self.assertRaisesRegex(ValueError, 'outside physical region'):
+            self.locate(calibration, [(40, 155, 80, 185, .9)])

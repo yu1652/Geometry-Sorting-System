@@ -18,7 +18,7 @@ except ImportError:
 
 IDLE_STATES = {'disconnected', 'needs_origin', 'armed', 'stopped'}
 TIMED_STATES = {'enabling_auto', 'starting', 'running', 'locating', 'wait_scan',
-                'recognizing', 'wait_repush', 'wait_done', 'verifying_drop'}
+                'recognizing', 'wait_repush', 'wait_done'}
 
 STYLE = '''
 QWidget#releaseDebug {background:#f1f3f6;color:#172437;}
@@ -149,7 +149,7 @@ def _build_controls(window, side):
     xy.addLayout(xy_actions)
     xy_actions.addWidget(_button('回 HOME', window.return_home))
     release_motor = _button('释放电机', window.stop)
-    release_motor.setToolTip('发送停止，释放后继续运行需重新手动对零。')
+    release_motor.setToolTip('发送停止；继续前确认机构是否被手推、卡住或丢步。')
     xy_actions.addWidget(release_motor)
     xy_actions.addWidget(_button('手动对零', window.confirm_origin))
     side.addWidget(xy_box)
@@ -216,7 +216,7 @@ def _build_controls(window, side):
     for text, callback, name in (
         ('停止', lambda: end_loop_then(window.stop), 'debugStop'),
         ('手动识别', window.manual_recognize, None),
-        ('复位', lambda: end_loop_then(window.reset), None),
+        ('完全复位', lambda: end_loop_then(window.reset), 'debugFullReset'),
         ('XY 标定', window.show_calibration, None),
     ):
         actions.addWidget(_button(text, callback, name), 1)
@@ -227,11 +227,10 @@ def _build_controls(window, side):
     menu = QMenu(more)
     more.setMenu(menu)
     navigation.addWidget(more)
-    window.empty_reference_button = _button('采集空区', window.capture_empty_reference)
-    loop_row.addWidget(window.empty_reference_button)
     for text, callback in (
         ('托盘定位（只显示）', window.manual_locate),
-        ('位置没动，继续', lambda: window.write_log('当前固件在释放电机后需要重新手动对零。')),
+        ('保存托盘底板（清空后）', lambda: end_loop_then(window.save_tray_background)),
+        ('位置没动，继续', lambda: end_loop_then(window.start)),
         ('清空本轮', lambda: end_loop_then(window.clear_round)),
         ('退出', lambda: end_loop_then(window.close)),
     ):
@@ -258,6 +257,8 @@ def _build_controls(window, side):
         elapsed = 0.0
         previous_tick = time.monotonic()
         update_clock()
+
+    window._reset_debug_clock = reset_clock
 
     clock_row.addWidget(_button('清零', reset_clock))
     clock_timer.timeout.connect(update_clock)

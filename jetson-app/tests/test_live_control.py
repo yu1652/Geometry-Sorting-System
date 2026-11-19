@@ -47,6 +47,26 @@ class LiveControllerTests(unittest.TestCase):
         self.assertTrue(self.control.ready)
         self.assertFalse(self.control.snapshot().origin_confirmed)
 
+    def test_stop_capable_39_step_firmware_can_handshake(self):
+        self.control.begin_handshake()
+        self.control.handle_mcu('PONG')
+        self.control.handle_mcu('VERSION,ESP32_SORTER_XY_PUSHER,0.1.0-stop.1')
+        self.control.handle_mcu('STATUS,MCU,WAIT_START,0,0,123')
+        self.assertTrue(self.control.ready)
+        self.assertFalse(self.control.snapshot().origin_confirmed)
+
+    def test_interrupted_motion_cancels_reset_based_on_the_old_position(self):
+        self.arm()
+        self.assertTrue(self.control.reset_known_origin())
+        self.control.handle_mcu('RX,STOP')
+        self.control.handle_mcu('STATUS,ORIGIN_REQUIRED')
+        self.control.handle_mcu('STATUS,STOP')
+        self.control.handle_mcu('STATUS,MCU,STOP,800,400,123')
+        self.assertFalse(self.control.can_reuse_origin)
+        self.assertFalse(self.control.reset_in_progress)
+        self.assertFalse(self.control.snapshot().origin_confirmed)
+        self.assertFalse(any(line.startswith('GOTO_MM,') for line in self.sent))
+
     def test_replaced_40_step_firmware_cannot_arm_39_step_console(self):
         self.control.begin_handshake()
         self.control.handle_mcu('PONG')
@@ -94,27 +114,27 @@ class LiveControllerTests(unittest.TestCase):
 
     def test_machine_corner_goto_waits_for_exact_real_pulses(self):
         self.arm()
-        self.assertTrue(self.control.goto(260, 230))
-        self.assertEqual(self.sent[-2:], ['GOTO_MM,260.000,230.000', 'STATUS?'])
-        for line in ('RX,GOTO_MM,260.000,230.000', 'STATUS,PUSHER_UP',
-                     'STATUS,MCU,WAIT_START,10400,8969,123',
-                     'STATUS,MCU,WAIT_START,10399,8970,123',
-                     'STATUS,MCU,IDLE,10400,8970,123'):
+        self.assertTrue(self.control.goto(210, 230))
+        self.assertEqual(self.sent[-2:], ['GOTO_MM,210.000,230.000', 'STATUS?'])
+        for line in ('RX,GOTO_MM,210.000,230.000', 'STATUS,PUSHER_UP',
+                     'STATUS,MCU,WAIT_START,8400,8969,123',
+                     'STATUS,MCU,WAIT_START,8399,8970,123',
+                     'STATUS,MCU,IDLE,8400,8970,123'):
             self.control.handle_mcu(line)
             self.assertEqual(self.control.pending, 'goto')
-        self.control.handle_mcu('STATUS,MCU,WAIT_START,10400,8970,123')
+        self.control.handle_mcu('STATUS,MCU,WAIT_START,8400,8970,123')
         self.assertIsNone(self.control.pending)
-        self.assertEqual((self.control.snapshot().x_mm, self.control.snapshot().y_mm), (260, 230))
+        self.assertEqual((self.control.snapshot().x_mm, self.control.snapshot().y_mm), (210, 230))
 
     def test_push_accepts_machine_corner_above_tray_size(self):
         self.start_running()
         self.control.handle_mcu('PUSH?')
-        self.assertTrue(self.control.provide_target(260, 230))
-        self.assertEqual(self.sent[-1], 'PUSH,260.000,230.000,mm')
+        self.assertTrue(self.control.provide_target(210, 230))
+        self.assertEqual(self.sent[-1], 'PUSH,210.000,230.000,mm')
         self.assertEqual(self.control.snapshot().state, 'wait_scan')
 
     def test_push_beyond_either_machine_axis_stops_without_push(self):
-        for x, y in ((260.001, 230), (260, 230.001)):
+        for x, y in ((210.001, 230), (210, 230.001)):
             with self.subTest(x=x, y=y):
                 self.setUp()
                 self.start_running()
@@ -450,7 +470,7 @@ class LiveControllerTests(unittest.TestCase):
 
     def test_bad_coordinates_and_bins_do_not_send_motion(self):
         self.arm()
-        for x, y in ((-1, 0), (260.001, 0), (0, 230.001), (0, -1), (float('nan'), 1), (1, float('inf')), (True, 1)):
+        for x, y in ((-1, 0), (210.001, 0), (0, 230.001), (0, -1), (float('nan'), 1), (1, float('inf')), (True, 1)):
             before = list(self.sent)
             self.assertFalse(self.control.goto(x, y))
             self.assertEqual(self.sent, before)

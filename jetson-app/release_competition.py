@@ -1,3 +1,4 @@
+from app import qt_enum
 """Compact competition display for the Linux 20261107 profile."""
 
 import cv2
@@ -150,7 +151,7 @@ class ReleaseCompetition(QWidget):
         self.pause_button.setEnabled(False)
         controls.addWidget(self.pause_button)
         for text, action in (
-            ('停止', window.stop), ('复位', window.reset),
+            ('停止', window.stop), ('完全复位', window.reset),
             ('零点确认', window.confirm_origin),
             ('相机设置', window.camera_settings), ('标定', window.show_calibration),
             ('切换到调试界面', window.show_debug), ('退出', window.close),
@@ -236,9 +237,9 @@ class ReleaseCompetition(QWidget):
         self.table = QTableWidget(4, 6)
         self.table.horizontalHeader().hide()
         self.table.setVerticalHeaderLabels(('储物盒序号', '货物名称', '货物图片', '成功数量'))
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers if hasattr(QTableWidget, 'EditTrigger') else QTableWidget.NoEditTriggers)
+        self.table.setEditTriggers(qt_enum(QTableWidget, 'EditTrigger', 'NoEditTriggers'))
         header = self.table.horizontalHeader()
-        stretch = header.ResizeMode.Stretch if hasattr(header, 'ResizeMode') else header.Stretch
+        stretch = qt_enum(header, 'ResizeMode', 'Stretch')
         header.setSectionResizeMode(stretch)
         self.table.setRowHeight(0, 30)
         self.table.setRowHeight(1, 32)

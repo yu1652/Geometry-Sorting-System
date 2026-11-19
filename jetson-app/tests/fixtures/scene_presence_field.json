@@ -1,0 +1,8 @@
+{
+  "source": "Operator-provided Jetson diagnostic captures; no model labels used as ground truth",
+  "empty": "2026-11-14, jetson-latest-sample.zip, two empty recognition views and their recorded reference",
+  "green": "2026-11-11, diagnostic sample token 5; operator-identified green quadrangular prism",
+  "black": "2026-11-11, diagnostic sample token 10; operator-identified black triangular pyramid",
+  "format": "scene_presence_field.npz: {scene}_{reference|current}_{left|right}, original uint8 640x480 BGR arrays",
+  "purpose": "Regression fixtures for scene presence only; not a shape/colour training dataset"
+}

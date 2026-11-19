@@ -1,6 +1,7 @@
 """Three physical cameras and TensorRT models owned by one worker thread."""
 import math
 import time
+from copy import deepcopy
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event
@@ -75,6 +76,8 @@ class LiveVisionWorker(QThread):
     frames_ready = Signal(object)
     recognition_ready = Signal(int, object)
     location_ready = Signal(int, object)
+    location_evidence_ready = Signal(int, object)
+    tray_background_ready = Signal(int, object)
     empty_reference_ready = Signal(int, object)
     models_ready = Signal()
     failed = Signal(int, str)
@@ -83,7 +86,9 @@ class LiveVisionWorker(QThread):
     def __init__(self, sources, parent=None, capture_factory=None,
                  recognizer_factory=default_recognizer_factory, tray_factory=None,
                  scan_settle_seconds=0.8, drain_batches=4, clock=time.monotonic,
-                 tray_feature_input=False, tray_compensation=None, warm_models=False):
+                 tray_feature_input=False, tray_compensation=None, warm_models=False,
+                 tray_contact_ignore_unresolved=False,
+                 tray_contact_side_clearance_mm=0.5, tray_contact_allow_sweep_mm2=0.25):
         super().__init__(parent)
         if set(sources) != set(CAMERA_ROLES):
             raise ValueError('All three physical camera roles must be configured')
@@ -107,6 +112,16 @@ class LiveVisionWorker(QThread):
         self.tray_factory = tray_factory or _default_tray_factory
         self.tray_feature_input = tray_feature_input
         self.tray_compensation = tray_compensation
+        if type(tray_contact_ignore_unresolved) is not bool:
+            raise ValueError('Tray contact relaxation must be a boolean')
+        self.tray_contact_ignore_unresolved = tray_contact_ignore_unresolved
+        for name, value, upper in (('tray_contact_side_clearance_mm', tray_contact_side_clearance_mm, 5),
+                                   ('tray_contact_allow_sweep_mm2', tray_contact_allow_sweep_mm2, 500)):
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not 0 <= value <= upper):
+                raise ValueError('%s must be a finite number between 0 and %g' % (name, upper))
+        self.tray_contact_side_clearance_mm = float(tray_contact_side_clearance_mm)
+        self.tray_contact_allow_sweep_mm2 = float(tray_contact_allow_sweep_mm2)
         self.warm_models = warm_models
         factory = capture_factory or (lambda path: open_live_capture(path, self.notice.emit))
         self._cameras = CameraService(self.sources, factory)
@@ -127,8 +142,16 @@ class LiveVisionWorker(QThread):
     def recognize(self, token, settle=False):
         return self._submit(token, ('recognize', token, bool(settle), self._clock()))
 
-    def locate(self, token, calibration, roi, offsets):
-        return self._submit(token, ('locate', token, calibration, tuple(roi), tuple(offsets)))
+    def locate(self, token, calibration, roi, offsets, *, confidence=0.35, selection_region=None,
+               column_boundaries=None, background_reference=None, motion_target_only=False):
+        region = tuple(selection_region) if selection_region is not None else None
+        boundaries = tuple(column_boundaries) if column_boundaries is not None else None
+        reference = str(background_reference) if background_reference is not None else None
+        return self._submit(token, ('locate', token, calibration, tuple(roi), tuple(offsets),
+                                   confidence, region, boundaries, reference, bool(motion_target_only)))
+
+    def capture_tray_background(self, token):
+        return self._submit(token, ('tray_background', token))
 
     def capture_empty(self, token):
         return self._submit(token, ('empty_reference', token))
@@ -238,7 +261,10 @@ class LiveVisionWorker(QThread):
                 if frames is None:
                     break
                 try:
-                    if kind == 'empty_reference':
+                    if kind == 'tray_background':
+                        if not self._stopping.is_set():
+                            self.tray_background_ready.emit(token, frames['top'].copy())
+                    elif kind == 'empty_reference':
                         reference = {role: frame.copy() for role, frame in frames.items()}
                         if not self._stopping.is_set():
                             self.empty_reference_ready.emit(token, reference)
@@ -261,12 +287,51 @@ class LiveVisionWorker(QThread):
                         if not self._stopping.is_set():
                             self.recognition_ready.emit(token, result)
                     else:
-                        _, _, calibration, roi, offsets = request
-                        detector = TrayDetector(tray_backend, feature_input=self.tray_feature_input)
-                        locator = TrayLocator(calibration, detector, roi, offsets,
+                        (_, _, calibration, roi, offsets, confidence, selection_region,
+                         column_boundaries, reference_path, motion_target_only) = request
+                        capture_completed = self._clock()
+                        top = frames['top'].copy()
+                        if reference_path is not None:
+                            from tray_background import TrayBackgroundReference
+                            reference = TrayBackgroundReference.load(reference_path,
+                                expected_source_top=self.sources['top'], expected_roi=roi)
+                            from tray_foreground import TrayForegroundDetector
+                            x, y, width, height = roi
+                            # Run the existing tray model on the full fresh frame:
+                            # a tight legacy crop loses pale-part confidence.
+                            hints = TrayDetector(tray_backend, confidence=.4,
+                                                 feature_input=self.tray_feature_input).detect(top)
+                            local_hints = [(a-x,b-y,c-x,d-y,s) for a,b,c,d,s in hints]
+                            detector = TrayForegroundDetector(reference.frame[y:y + height, x:x + width],
+                                                              pale_hints=local_hints)
+                        else:
+                            detector = TrayDetector(tray_backend, confidence=confidence,
+                                                    feature_input=self.tray_feature_input)
+                        locator = TrayLocator(calibration, detector, roi, offsets, confidence=confidence,
                                               compensation=self.tray_compensation,
-                                              skip_unsafe=self.tray_compensation is not None)
-                        target = locator.locate(frames['top'])
+                                              skip_unsafe=self.tray_compensation is not None,
+                                              selection_region=selection_region,
+                                              column_boundaries=column_boundaries,
+                                              motion_target_only=motion_target_only,
+                                              pusher_width_mm=25.0 if reference_path is not None and motion_target_only else None,
+                                              contact_ignore_unresolved=self.tray_contact_ignore_unresolved,
+                                              contact_side_clearance_mm=self.tray_contact_side_clearance_mm,
+                                              contact_allow_sweep_mm2=self.tray_contact_allow_sweep_mm2)
+                        target = locator.locate(top.copy())
+                        if not self._stopping.is_set():
+                            evidence = {'captures': {'top': top},
+                                        'locator': deepcopy(getattr(locator, 'last_diagnostics', {})),
+                                        'detector': deepcopy(getattr(detector, 'last_diagnostics', {})),
+                                        'detector_kind': 'foreground' if reference_path is not None else 'yolo',
+                                        'background_reference': reference_path,
+                                        'source_top': self.sources['top'], 'roi': roi,
+                                        'offsets': offsets, 'compensation': deepcopy(self.tray_compensation),
+                                        'calibration': {name: deepcopy(getattr(calibration, name, None)) for name in
+                                                        ('coefficients', 'pixel_region', 'physical_region')},
+                                        'capture': {'drain_batches': self.drain_batches,
+                                                    'capture_completed_monotonic': capture_completed,
+                                                    'inference_completed_monotonic': self._clock()}}
+                            self.location_evidence_ready.emit(token, evidence)
                         if not self._stopping.is_set():
                             self.location_ready.emit(token, target)
                 except Exception as exc:

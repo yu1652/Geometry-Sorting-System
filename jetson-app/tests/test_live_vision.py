@@ -52,8 +52,13 @@ class Recognizer:
 
 
 class Calibration:
-    def map_pixel(self, x, y):
+    def project_pixel(self, x, y):
         return float(x), float(y)
+
+    def map_pixel(self, x, y):
+        position = self.project_pixel(x, y)
+        self.validate_physical(*position)
+        return position
 
     def validate_physical(self, x, y):
         if not 0 <= x <= 640 or not 0 <= y <= 480:

@@ -3,9 +3,9 @@ import math
 
 
 X_MIN_MM = 0.0
-X_MAX_MM = 260.0
+X_MAX_MM = 193.5
 Y_MIN_MM = 0.0
-Y_MAX_MM = 230.0
+Y_MAX_MM = 143.0
 MACHINE_REGION = (X_MIN_MM, Y_MIN_MM, X_MAX_MM, Y_MAX_MM)
 
 

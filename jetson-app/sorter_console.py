@@ -5,6 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from app import exec_qt, qt_enum
 from app import QApplication, ImageView, QDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton, QTimer, QVBoxLayout, QWidget, Qt, STYLE, panel
 
 try:
@@ -261,7 +262,7 @@ class CalibrationDialog(QDialog):
         ''')
         work = QHBoxLayout()
         outer.addLayout(work, 1)
-        ignored = getattr(QSizePolicy, 'Policy', QSizePolicy).Ignored
+        ignored = qt_enum(QSizePolicy, 'Policy', 'Ignored')
         self.view.setSizePolicy(ignored, ignored)
         work.addWidget(panel('托盘俯拍标定图 · 框内拖动 / 四角缩放 / 框外重画', self.view), 9)
         scroll = QScrollArea()
@@ -731,7 +732,7 @@ class SimulationWindow(QMainWindow):
     def show_calibration(self):
         dialog = self.create_calibration_dialog()
         try:
-            dialog.exec()
+            exec_qt(dialog)
         finally:
             dialog.deleteLater()
 
@@ -765,7 +766,7 @@ def main():
     app = QApplication([])
     window = SimulationWindow()
     window.showFullScreen() if args.fullscreen else window.show()
-    return app.exec()
+    return exec_qt(app)
 
 
 if __name__ == "__main__":

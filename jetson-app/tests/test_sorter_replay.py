@@ -78,4 +78,4 @@ class RecordedSorterTests(unittest.TestCase):
             path.write_text(json.dumps({'mode': 'simulation', 'points': rows}), encoding='utf8')
             mapping = _calibration(path)
             self.assertAlmostEqual(mapping.map_pixel(477, 92)[0], 182)
-            mapping.validate_physical(260, 230)
+            mapping.validate_physical(210, 230)

@@ -36,13 +36,20 @@ class XYCalibration:
         if rank != 6: raise ValueError('calibration points are rank deficient')
         return cls(coefficients, pixel_region, physical_region)
 
-    def map_pixel(self, x, y):
+    def project_pixel(self, x, y):
+        """Project image geometry without authorizing it as a motion target."""
         x,y = float(x),float(y)
         if not np.isfinite([x,y]).all() or not _inside(x,y,self.pixel_region):
             raise ValueError('pixel outside safe region')
         result = np.array([1,x,y,x*x,x*y,y*y]) @ self.coefficients
-        self.validate_physical(*result)
+        if not np.isfinite(result).all():
+            raise ValueError('nonfinite calibration projection')
         return tuple(float(v) for v in result)
+
+    def map_pixel(self, x, y):
+        result = self.project_pixel(x, y)
+        self.validate_physical(*result)
+        return result
 
     def validate_physical(self, x, y):
         if not np.isfinite([x,y]).all() or not _inside(x,y,self.physical_region):

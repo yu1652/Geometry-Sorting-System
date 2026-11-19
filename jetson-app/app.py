@@ -41,6 +41,19 @@ from media import MediaSource
 from vision_worker import VisionWorker, default_recognizer_factory
 
 ROOT = Path(__file__).resolve().parent
+
+
+def exec_qt(target):
+    """Qt 5.10 exposes exec_ only; keep the dialog result on both bindings."""
+    method = getattr(target, 'exec', None)
+    return method() if method is not None else target.exec_()
+
+
+def qt_enum(owner, namespace, member):
+    """Old PyQt can expose an enum type without its scoped members."""
+    value = getattr(getattr(owner, namespace, None), member, None)
+    return value if value is not None else getattr(owner, member)
+
 STYLE = '''
 QMainWindow,QDialog {background:#eaf0f5;color:#233246;}
 QWidget {font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;font-size:12px;}
@@ -620,7 +633,7 @@ class Window(QMainWindow):
         form.addRow('样本保存目录', path_label)
         if not self.linux_20261107:
             model_button = QPushButton('模型管理')
-            model_button.clicked.connect(lambda: ModelDialog(self).exec() if not self.model_busy and self.active_request_id is None else None)
+            model_button.clicked.connect(lambda: exec_qt(ModelDialog(self)) if not self.model_busy and self.active_request_id is None else None)
             form.addRow('模型', model_button)
         tabs.addTab(page, '设置')
         log = QTextEdit()
@@ -632,7 +645,7 @@ class Window(QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        if dialog.exec() == QDIALOG_ACCEPTED:
+        if exec_qt(dialog) == QDIALOG_ACCEPTED:
             self.layout_mode = combo.currentText()
             (ROOT/'data').mkdir(exist_ok=True)
             try:
@@ -705,7 +718,7 @@ def main():
     window.showFullScreen() if args.fullscreen else window.show()
     if args.file:
         window.load_file(args.file)
-    return app.exec()
+    return exec_qt(app)
 
 
 if __name__ == '__main__':

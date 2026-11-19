@@ -319,7 +319,7 @@ class LegacyRecognizerTests(unittest.TestCase):
         self.assertEqual(len(self.segmenter.inputs), 0)
 
     def test_cross_seam_tie_assigns_left_and_color_prefers_a_known_view(self):
-        self.right[:] = (10, 0, 10)  # Saturated but below every hue range's value floor.
+        self.right[:] = (25, 0, 50)  # Hue 165 is outside the configured chromatic ranges.
         tied_box = ((280, 80, 360, 160), 7, 0.7)
         recognizer = self.make_recognizer(_raw(tied_box, self.right_box), self.empty, self.empty)
         result = recognizer.recognize_pair(self.left, self.right)

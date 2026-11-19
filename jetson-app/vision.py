@@ -100,8 +100,8 @@ def decode_yolo_raw(
     expected_count: int = 23,
 ) -> List[Detection]:
     """Decode YOLO11 [1, 4 + nc, N] output and run class-aware NMS."""
-    if expected_count not in (1, 8, 23, 24, 26):
-        raise ValueError("expected_count must be 1, 8, 23, 24 or 26")
+    if type(expected_count) is not int or not 1 <= expected_count <= 1000:
+        raise ValueError("expected_count must be an integer in [1,1000]")
     if len(class_names) != expected_count:
         raise ValueError("class_names must contain exactly %d entries" % expected_count)
     if not isinstance(output, np.ndarray) or output.ndim != 3 or output.shape[0] != 1:
@@ -159,8 +159,8 @@ def decode_yolo_raw(
 
 def load_class_names(path, expected_count: int = 23) -> List[str]:
     """Load class names, allowing a training reserve tail for the 23-class model."""
-    if expected_count not in (1, 8, 23, 24, 26):
-        raise ValueError("expected_count must be 1, 8, 23, 24 or 26")
+    if type(expected_count) is not int or not 1 <= expected_count <= 1000:
+        raise ValueError("expected_count must be an integer in [1,1000]")
     try:
         entries = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -277,7 +277,7 @@ def classify_hsv(frame_bgr: np.ndarray, mask: np.ndarray, box, config) -> ColorR
     value = pixels[:, 2]
     achromatic = saturation <= int(color_config["achromatic_saturation_max"])
     counts = {
-        "黑色": int(np.count_nonzero(achromatic & (value <= int(color_config["black_value_max"])))),
+        "黑色": int(np.count_nonzero(value <= int(color_config["black_value_max"]))),
         "白色": int(np.count_nonzero(achromatic & (value >= int(color_config["white_value_min"])) )),
         "灰色": int(np.count_nonzero(
             achromatic

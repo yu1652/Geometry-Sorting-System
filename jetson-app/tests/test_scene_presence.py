@@ -108,13 +108,53 @@ class ScenePresenceTests(unittest.TestCase):
             with self.subTest(role=role):
                 self.assertNotEqual(self.ref.assess(changed, self.sources).state, 'empty')
 
-    def test_small_global_light_shift_is_unknown(self):
+    def test_moderate_global_light_shift_is_empty(self):
         self.ref.record(self.frames, self.sources)
         for delta in (10, 14, -10, -14):
             frames = {role: (frame.astype(np.int16) + delta).clip(0, 255).astype(np.uint8)
                       for role, frame in self.frames.items()}
             with self.subTest(delta=delta):
-                self.assertEqual(self.ref.assess(frames, self.sources).state, 'unknown')
+                self.assertEqual(self.ref.assess(frames, self.sources).state, 'empty')
+
+    def test_smooth_local_lighting_and_sensor_noise_are_empty(self):
+        self.ref.record(self.frames, self.sources)
+        yy, xx = np.indices((480, 640))
+        lighting = 18 * np.sin(xx / 100.) + 12 * np.cos(yy / 100.)
+        noise = np.random.default_rng(12).integers(-6, 7, (480, 640, 3))
+        changed = {role: (frame.astype(np.float32) + lighting[:, :, None] + noise)
+                   .clip(0, 255).astype(np.uint8) for role, frame in self.frames.items()}
+        self.assertEqual(self.ref.assess(changed, self.sources).state, 'empty')
+        # Illumination compensation must not remove an object's boundary.
+        for color in ((0, 0, 0), (255, 255, 255), (20, 40, 230)):
+            occupied = {role: frame.copy() for role, frame in changed.items()}
+            occupied['right'][180:225, 280:325] = color
+            with self.subTest(color=color):
+                self.assertEqual(self.ref.assess(occupied, self.sources).state, 'occupied')
+
+    def test_camera_displacement_cannot_be_called_empty(self):
+        self.ref.record(self.frames, self.sources)
+        moved = {role: np.roll(frame, 15, axis=1) for role, frame in self.frames.items()}
+        self.assertNotEqual(self.ref.assess(moved, self.sources).state, 'empty')
+
+    def test_moderate_exposure_gain_and_colour_cast_are_empty(self):
+        self.ref.record(self.frames, self.sources)
+        for gain in (.8, 1.2):
+            changed = {role: (frame.astype(np.float32) * gain + np.array([8, -4, 4]))
+                       .clip(0, 255).astype(np.uint8) for role, frame in self.frames.items()}
+            with self.subTest(gain=gain):
+                self.assertEqual(self.ref.assess(changed, self.sources).state, 'empty')
+
+    def test_recorded_field_empty_and_occupied_scenes(self):
+        # User-provided raw images from Nov 11/14. No detector outputs or model
+        # labels participate: the operator identified empty/green/black scenes.
+        fixture = Path(__file__).parent / 'fixtures/scene_presence_field.npz'
+        with np.load(fixture, allow_pickle=False) as data:
+            for name, expected in (('empty', 'empty'), ('green', 'occupied'), ('black', 'occupied')):
+                reference = {role: data[name + '_reference_' + role] for role in ('left', 'right')}
+                current = {role: data[name + '_current_' + role] for role in ('left', 'right')}
+                self.ref.record(reference, self.sources)
+                with self.subTest(scene=name):
+                    self.assertEqual(self.ref.assess(current, self.sources).state, expected)
 
     def test_result_preserves_exact_reference_snapshot_after_rerecord(self):
         self.ref.record(self.frames, self.sources)

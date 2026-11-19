@@ -47,6 +47,9 @@ class LiveConsoleTests(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.window = LiveWindow(data_dir=Path(self.folder.name))
+        confirm = patch.object(self.window, '_ask_origin_unchanged', return_value=True, create=True)
+        confirm.start()
+        self.addCleanup(confirm.stop)
         self.addCleanup(self.window.close)
 
     def test_default_has_two_pages_and_no_connection_or_sample_calibration_authority(self):
@@ -58,14 +61,14 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertFalse(window.calibration_confirmed.isChecked())
         self.assertFalse(window.machine.snapshot().origin_confirmed)
         self.assertFalse(window.start())
-        for name in ('运行', '复位', '退出'):
-            self.assertEqual(window.actions[name].text(), name)
+        for name, label in (('运行', '运行'), ('复位', '完全复位'), ('退出', '退出')):
+            self.assertEqual(window.actions[name].text(), label)
         window.show_competition()
         self.assertIs(window.pages.currentWidget(), window.competition_page)
         window.show_debug()
         self.assertIs(window.pages.currentWidget(), window.debug_page)
 
-    def test_actual_camera_role_order_and_saved_calibration_still_requires_validation(self):
+    def test_actual_camera_role_order_and_saved_calibration_is_auto_validated(self):
         window = self.window
         self.assertIn('2.1:', window.sources['left'])
         self.assertIn('2.2:', window.sources['right'])
@@ -74,7 +77,7 @@ class LiveConsoleTests(unittest.TestCase):
         value = json.loads(window.calibration_path.read_text(encoding='utf8'))
         self.assertEqual(value['mode'], 'live')
         self.assertEqual(len(value['points']), 9)
-        self.assertFalse(window.calibration_confirmed.isChecked())
+        self.assertTrue(window.calibration_confirmed.isChecked())
         dialog = window.create_calibration_dialog()
         self.addCleanup(dialog.reject)
         self.assertNotIn('仿真', dialog.windowTitle())
@@ -87,7 +90,7 @@ class LiveConsoleTests(unittest.TestCase):
         self.addCleanup(dialog.reject)
         x = dialog.findChild(CoordinateSpinBox, 'coordinate_2_3')
         y = dialog.findChild(CoordinateSpinBox, 'coordinate_8_4')
-        self.assertEqual(x.maximum(), 260)
+        self.assertEqual(x.maximum(), 210)
         self.assertEqual(y.maximum(), 230)
         for row in range(9):
             dialog.points.item(row, 3).setText(str(70 + 56 * (row % 3)))
@@ -95,8 +98,8 @@ class LiveConsoleTests(unittest.TestCase):
         rows = calibration_rows(dialog.points)
         mapping = validate_points(rows)
         self.assertAlmostEqual(mapping.map_pixel(477, 92)[0], 182)
-        mapping.validate_physical(260, 230)
-        for position in ((260.001, 230), (260, 230.001), (-.001, 0)):
+        mapping.validate_physical(210, 230)
+        for position in ((210.001, 230), (210, 230.001), (-.001, 0)):
             with self.assertRaises(ValueError):
                 mapping.validate_physical(*position)
         dialog.set_frame((150.43, 47.86, 377.44, 374.7))
@@ -110,13 +113,13 @@ class LiveConsoleTests(unittest.TestCase):
         self.addCleanup(saved.reject)
         self.assertEqual(saved.view.box, dialog.view.box)
         self.assertEqual(saved.frame_inset.value(), 18)
-        self.assertFalse(restored.calibration_confirmed.isChecked())
+        self.assertTrue(restored.calibration_confirmed.isChecked())
 
     def test_out_of_travel_calibration_does_not_overwrite_saved_points(self):
         from sorter_console import DEFAULT_POINTS
         self.window.save_calibration(list(DEFAULT_POINTS))
         before = self.window.calibration_path.read_bytes()
-        for x, y in ((260.001, 100), (100, 230.001), (float('nan'), 20)):
+        for x, y in ((210.001, 100), (100, 230.001), (float('nan'), 20)):
             rows = [list(row) for row in DEFAULT_POINTS]
             rows[0][3:5] = (x, y)
             with self.subTest(x=x, y=y), self.assertRaises(ValueError):
@@ -150,7 +153,7 @@ class LiveConsoleTests(unittest.TestCase):
                 self.window.save_calibration(self.window.calibration_rows, frame=frame)
             self.assertEqual(self.window.calibration_path.read_bytes(), before)
 
-    def test_existing_six_adjusted_points_survive_old_file_upgrade_without_confirmation(self):
+    def test_existing_six_adjusted_points_survive_old_file_upgrade_with_auto_validation(self):
         from sorter_console import DEFAULT_POINTS, calibration_rows
         from live_console import LiveWindow
         rows = [list(row) for row in DEFAULT_POINTS]
@@ -165,11 +168,11 @@ class LiveConsoleTests(unittest.TestCase):
         dialog = restored.create_calibration_dialog()
         self.addCleanup(dialog.reject)
         self.assertEqual(calibration_rows(dialog.points), [tuple(row) for row in rows])
-        self.assertFalse(restored.calibration_confirmed.isChecked())
+        self.assertTrue(restored.calibration_confirmed.isChecked())
         dialog.set_frame((150.43,47.86,377.44,374.7))
         dialog.save_points()
         self.assertEqual(restored.calibration_rows, [tuple(row) for row in rows])
-        self.assertFalse(restored.calibration_confirmed.isChecked())
+        self.assertTrue(restored.calibration_confirmed.isChecked())
 
     def test_manual_result_does_not_count_and_stale_result_is_discarded(self):
         window = self.window
@@ -243,7 +246,7 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertEqual(window.calibration_path.read_bytes(), saved)
         self.assertTrue(window.calibration_confirmed.isChecked())
         dialog.save_points()
-        self.assertFalse(window.calibration_confirmed.isChecked())
+        self.assertTrue(window.calibration_confirmed.isChecked())
         self.assertEqual(window.calibration_rows[0][1], 240)
         self.assertEqual(sent, [])
 
@@ -291,7 +294,7 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertIsNone(self.window.serial_port)
         self.assertFalse(self.window.machine.snapshot().origin_confirmed)
 
-    def test_reset_waits_for_stop_ack_before_prompting_for_manual_origin(self):
+    def test_reset_waits_for_verified_stop_status_before_lifting(self):
         from esp32_serial import SerialLineTransport
         window = self.window
         sent = self.ready_manual_controller()
@@ -299,14 +302,19 @@ class LiveConsoleTests(unittest.TestCase):
         port = window.serial_port = FakePort()
         window.transport = SerialLineTransport(port)
         self.addCleanup(window._finish_serial_close)
-        with patch.object(window, 'confirm_origin') as confirm:
-            self.assertTrue(window.reset())
-            self.assertNotIn('RESET', sent)
-            self.assertFalse(confirm.called)
-            port.data = b'STATUS,STOP\n'
-            window.poll_serial()
-            APP.processEvents()
-            confirm.assert_called_once()
+        self.assertTrue(window.reset())
+        self.assertNotIn('RESET', sent)
+        port.data = b'STATUS,STOP\n'
+        window.poll_serial()
+        self.assertNotIn('PUSHER,UP', sent)
+        port.data = b'RX,STOP\nSTATUS,STOP\n'
+        window.poll_serial()
+        self.assertIn('STATUS?', sent)
+        self.assertNotIn('PUSHER,UP', sent)
+        port.data = b'RX,STATUS?\nSTATUS,MCU,STOP,0,0,77\n'
+        window.poll_serial()
+        self.assertIn('PUSHER,UP', sent)
+        self.assertNotIn('RESET', sent)
 
     def test_cannot_reconnect_serial_while_closing(self):
         with patch.object(self.window, '_serial_factory') as factory:
@@ -314,13 +322,22 @@ class LiveConsoleTests(unittest.TestCase):
                 self.window.connect_serial()
             factory.assert_not_called()
 
-    def test_stop_cancels_already_queued_reset_prompt(self):
-        self.ready_manual_controller()
-        epoch = self.window.machine.epoch
-        self.window.stop()
-        with patch.object(self.window, 'confirm_origin') as confirm:
-            self.window._confirm_reset(epoch)
-            confirm.assert_not_called()
+    def test_stop_cancels_reset_and_ignores_its_late_motion_events(self):
+        from esp32_serial import SerialLineTransport
+        window = self.window
+        sent = self.ready_manual_controller()
+        port = window.serial_port = FakePort()
+        window.transport = SerialLineTransport(port)
+        self.addCleanup(window._finish_serial_close)
+        self.assertTrue(window.reset())
+        self.assertTrue(window.machine.reset_in_progress)
+        window.stop()
+        before = list(sent)
+        port.data = b'RX,STOP\nSTATUS,STOP\nRX,STATUS?\nSTATUS,MCU,STOP,0,0,77\n'
+        window.poll_serial()
+        self.assertFalse(window.machine.reset_in_progress)
+        self.assertEqual(sent, before)
+        self.assertEqual(window.auto_bins.total, 0)
 
     def test_invalid_saved_calibration_cannot_authorize_default_points(self):
         from live_console import LiveWindow
@@ -344,12 +361,12 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertFalse(self.window.manual_recognize())
         self.assertIsNone(self.window._job)
 
-    def test_models_force_raw_mode_and_block_reconnection(self):
+    def test_models_open_live_manager_and_block_reconnection(self):
         window = self.window
         process = SimpleNamespace(poll=lambda: None)
         with patch('live_console.subprocess.Popen', return_value=process) as spawn:
             window.open_models()
-        self.assertIn('--raw', spawn.call_args[0][0])
+        self.assertTrue(spawn.call_args[0][0][1].endswith('side_model_manager.py'))
         window.connect_cameras()
         window.connect_serial()
         self.assertIsNone(window.vision)
